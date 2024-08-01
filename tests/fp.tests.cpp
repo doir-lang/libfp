@@ -8,12 +8,15 @@
 
 #include <fp/pointer.h>
 #include <fp/dynarray.h>
+#include <fp/string.h>
 
 extern "C" {
 void check_stack();
 void check_heap();
 void check_view();
 void check_dynarray();
+void check_string();
+void check_utf32();
 }
 
 #define DISCARD_RESULT (void)
@@ -296,12 +299,106 @@ TEST_SUITE("LibFP") {
 		fpda_free(arr);
 	}
 
+	TEST_CASE("String") {
+		fp_string str = fp_string_promote_literal("Hello World");
+		CHECK(is_fp(str));
+		CHECK(is_fpda(str));
+		CHECK(!fp_is_stack_allocated(str));
+		CHECK(fp_is_heap_allocated(str));
+		CHECK(fpda_size(str) == 11);
+		CHECK(fp_string_compare(str, str) == 0);
+		CHECK(str[fp_string_length(str)] == 0); // fp_strings are null terminated!
+
+		auto concat = fp_string_concatenate(str, "!");
+		CHECK(fp_string_compare(str, concat) < 0);
+		CHECK(fp_string_compare(concat, str) > 0);
+		CHECK(fp_string_compare(concat, "Hello World!") == 0);
+		fp_string_concatenate_inplace(concat, " bob");
+		CHECK(fp_string_compare(concat, "Hello World! bob") == 0);
+		CHECK(fp_string_contains(concat, "World!", 0));
+		CHECK(fp_string_find(concat, "World!", 0) == 6);
+		fp_string_free(concat);
+		// printf("%s\n", concat);
+
+		fp_string concatN = fp_string_concatenate_n(4, "Hello", " ", "World", "!");
+		CHECK(fp_string_compare(concatN, "Hello World!"));
+		fp_string_free(concatN);
+
+		auto clone = fp_string_make_dynamic(str);
+		auto append = fp_string_append(clone, '!');
+		CHECK(fp_string_compare(append, "Hello World!") == 0);
+		fp_string_free(append);
+
+		auto fmt = fp_string_format("%s %s%c\n", "Hello", "World", '!');
+		CHECK(fp_string_compare(fmt, "Hello World!\n") == 0);
+		fp_string_free(fmt);
+
+		auto repl = fp_string_replicate("Hello World", 5);
+		CHECK(fp_string_compare(repl, "Hello WorldHello WorldHello WorldHello WorldHello World") == 0);
+
+		auto replaced = fp_string_replace(repl, "World", "Bob", 0);
+		fp_string_free(repl);
+		CHECK(fp_string_compare(replaced, "Hello BobHello BobHello BobHello BobHello Bob") == 0);
+		CHECK(fp_string_starts_with(replaced, "Hello", 0));
+		CHECK(fp_string_ends_with(replaced, "Bob", 0));
+		fp_string_replace_inplace(&replaced, fp_string_to_view_const("Bob"), fp_string_to_view_const("World!"), 0);
+		CHECK(fp_string_compare(replaced, "Hello World!Hello World!Hello World!Hello World!Hello World!") == 0);
+		CHECK(fp_string_starts_with(replaced, "Hello", 0));
+		CHECK(fp_string_ends_with(replaced, "World!", 0));
+		CHECK(!fp_string_ends_with(replaced, "World", 0));
+		fp_string_free(replaced);
+
+		fp_string_free(str);
+	}
+
+	TEST_CASE("UTF32") {
+		auto cp = fp_string_to_codepoints("Hello, 世界");
+		uint32_t real[] = {'H', 'e', 'l', 'l', 'o', ',', ' ', 0x4E16, 0x754C};
+		size_t real_len = sizeof(real)/sizeof(real[0]);
+		CHECK(fpda_size(cp) == real_len);
+		CHECK(fp_view_equal(fp_view_make_full(uint32_t, cp), fp_view_literal(uint32_t, real, real_len)));
+
+		auto utf8 = fp_codepoints_to_string(cp);
+		fpda_free(cp);
+		CHECK(fp_string_equal(utf8, "Hello, 世界"));
+		fp_string_free(utf8);
+	}
+
+	TEST_CASE("Hash") {
+		CHECK(fp_hash_elements_to_skip(int) == 2);
+		int* hashtable = nullptr;
+
+		int key = 5;
+		CHECK(*fp_hash_insert(int, hashtable, key) == key);
+		key = 6;
+		CHECK(*fp_hash_insert_or_replace(int, hashtable, key) == key);
+		CHECK(*fp_hash_insert_or_replace(int, hashtable, key) == key);
+
+		CHECK(*fp_hash_find(int, hashtable, key) == key);
+		key = 5;
+		CHECK(*fp_hash_find(int, hashtable, key) == key);
+		key = 4;
+		CHECK(fp_hash_find(int, hashtable, key) == nullptr);
+
+		fp_hash_double_size_and_rehash(int, hashtable, false);
+		key = 6;
+		CHECK(*fp_hash_find(int, hashtable, key) == key);
+		key = 5;
+		CHECK(*fp_hash_find(int, hashtable, key) == key);
+		key = 4;
+		CHECK(fp_hash_find(int, hashtable, key) == nullptr);
+
+		fp_hash_free(hashtable);
+	}
+
 #if !(defined _MSC_VER || defined __APPLE__)
 	TEST_CASE("C") {
 		check_stack();
 		check_heap();
 		check_view();
 		check_dynarray();
+		check_string();
+		check_utf32();
 	}
 #endif
 }

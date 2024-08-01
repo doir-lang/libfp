@@ -1,8 +1,11 @@
 #include <doctest/doctest.h>
 // #include "doctest_stubs.hpp"
 
+#include <format>
+
 #include <fp/pointer.hpp>
 #include <fp/dynarray.hpp>
+#include <fp/string.hpp>
 
 TEST_SUITE("LibFP::C++") {
 
@@ -146,6 +149,65 @@ TEST_SUITE("LibFP::C++") {
 		CHECK(arr[1] == 6);
 
 		arr.free_and_null();
+	}
+
+	TEST_CASE("String") {
+		auto str = fp::raii::string{"Hello World"};
+		CHECK(str.is_fp());
+		CHECK(str.is_dynarray());
+		CHECK(!str.stack_allocated());
+		CHECK(str.heap_allocated());
+		CHECK(str.size() == 11);
+		CHECK(str == str);
+		// CHECK(str[str.size()] == 0); // fp_strings are null terminated! This check is out of bounds and will thus assert!
+
+		auto concat = str.concatenate("!");
+		CHECK(str < concat);
+		CHECK(concat > str);
+		CHECK(concat == "Hello World!");
+		concat.concatenate_inplace(" bob");
+		CHECK(concat == "Hello World! bob");
+		CHECK(concat.contains("World!"));
+		CHECK(concat.find("World!") == 6);
+
+		auto concatN = fp::builder::string{nullptr} << "Hello" << " " << "World" << "!";
+		CHECK(concatN == "Hello World!");
+
+		auto clone = str;
+		auto append = clone + '!';
+		CHECK(append == "Hello World!");
+
+#ifndef _MSC_VER
+		auto fmt = fp::raii::string{"%s %s%c\n"}.c_format("Hello", "World", '!');
+		CHECK(fmt == "Hello World!\n");
+#endif
+		auto fmt2 = fp::raii::string::format("{} {}{}\n", "Hello", "World", '!');
+		CHECK(fmt2 == "Hello World!\n");
+
+		auto repl = str.replicate(5);
+		CHECK(repl == "Hello WorldHello WorldHello WorldHello WorldHello World");
+
+		auto replaced = repl.replace("World", "Bob", 0);
+		CHECK(replaced == "Hello BobHello BobHello BobHello BobHello Bob");
+		CHECK(replaced.starts_with("Hello"));
+		CHECK(replaced.ends_with("Bob"));
+
+		replaced.replace_inplace("Bob", "World!");
+		CHECK(replaced == "Hello World!Hello World!Hello World!Hello World!Hello World!");
+		CHECK(replaced.starts_with("Hello"));
+		CHECK(replaced.ends_with("World!"));
+		CHECK(!replaced.ends_with("World"));
+	}
+
+	TEST_CASE("UTF32") {
+		auto cp = fp::wrapped::string{"Hello, 世界"}.to_codepoints();
+		std::array<uint32_t, 9> real = {'H', 'e', 'l', 'l', 'o', ',', ' ', 0x4E16, 0x754C};
+		CHECK(cp.size() == real.size());
+		CHECK(cp.view_full() == fp::view<uint32_t>{real.data(), real.size()});
+
+		auto utf8 = fp::raii::string::from_codepoints(cp);
+		cp.free_and_null();
+		CHECK(utf8 == "Hello, 世界");
 	}
 
 }
