@@ -123,6 +123,34 @@ for(int& val : data)
 :project: fp_doxygen
 ```
 
+## Basic Dynamic Array Usage
+
+```cpp
+fp::dynarray<int> numbers;
+
+// Add elements
+numbers.push_back(10);
+numbers.push_back(20);
+numbers.push_back(30);
+
+// Method chaining
+numbers.reserve(100)
+       .grow(5, 42)
+       .push_back(99);
+
+// Iteration
+for(auto& n : numbers)
+    std::cout << n << " ";
+
+// Manual cleanup
+numbers.free();
+```
+
+```{doxygenstruct} fp::dynarray
+:project: fp_doxygen
+:path: include/fp/dynarray.hpp
+```
+
 ## Indices and Tables
 
 - {ref}`genindex`
