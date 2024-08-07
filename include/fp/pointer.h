@@ -122,7 +122,8 @@ extern "C" {
 enum FP_MagicNumbers {
 	FP_MAGIC_NUMBER = 0xFE00,
 	FP_HEAP_MAGIC_NUMBER = 0xFEFE,
-	FP_STACK_MAGIC_NUMBER = 0xFEFF
+	FP_STACK_MAGIC_NUMBER = 0xFEFF,
+	FP_DYNARRAY_MAGIC_NUMBER = 0xFEFD,
 };
 
 struct __FatPointerHeaderTruncated { // TODO: Make sure to keep this struct in sync with the following one
@@ -271,7 +272,7 @@ FP_CONSTEXPR inline static size_t fp_magic_number(const void* p) FP_NOEXCEPT {
 }
 
 FP_CONSTEXPR inline static bool fp_is_stack_allocated(const void* p) FP_NOEXCEPT { return fp_magic_number(p) == FP_STACK_MAGIC_NUMBER; }
-FP_CONSTEXPR inline static bool fp_is_heap_allocated(const void* p) FP_NOEXCEPT { return fp_magic_number(p) == FP_HEAP_MAGIC_NUMBER; }
+FP_CONSTEXPR inline static bool fp_is_heap_allocated(const void* p) FP_NOEXCEPT { return fp_magic_number(p) == FP_HEAP_MAGIC_NUMBER || fp_magic_number(p) == FP_DYNARRAY_MAGIC_NUMBER; }
 
 inline static void fp_free(void* p) FP_NOEXCEPT { __fp_alloc(p, 0); }
 #define fp_free_and_null(p) (fp_free(p), p = NULL)
