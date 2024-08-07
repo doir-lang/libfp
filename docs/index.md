@@ -102,6 +102,137 @@ fp_free_and_null(data);
 :project: fp_doxygen
 ```
 
+## Basic Dynamic Array Example
+
+```cpp
+// Create empty dynamic array
+fp_dynarray(int) arr = NULL;
+
+// Push elements (automatically grows)
+fpda_push_back(arr, 10);
+fpda_push_back(arr, 20);
+fpda_push_back(arr, 30);
+
+printf("Size: %zu, Capacity: %zu\n", fpda_size(arr), fpda_capacity(arr));
+
+// Access elements
+for(size_t i = 0; i < fpda_size(arr); i++)
+    printf("%d ", arr[i]);
+
+fpda_free_and_null(arr);
+```
+
+```{doxygendefine} fp_dynarray
+:project: fp_doxygen
+```
+
+```{doxygendefine} fpda_push_back
+:project: fp_doxygen
+```
+
+```{doxygendefine} fpda_size
+:project: fp_doxygen
+```
+
+```{doxygendefine} fpda_capacity
+:project: fp_doxygen
+```
+
+```{doxygendefine} fpda_free_and_null
+:project: fp_doxygen
+```
+
+## Common Dynamic Array Operations
+
+```cpp
+fp_dynarray(int) numbers = NULL;
+
+// Reserve capacity
+fpda_reserve(numbers, 100);
+
+// Add elements
+for(int i = 0; i < 50; i++)
+    fpda_push_back(numbers, i);
+
+// Insert in middle
+fpda_insert(numbers, 25, 999);
+
+// Delete element
+fpda_delete(numbers, 10);
+
+// Pop from back
+fpda_pop_back(numbers);
+
+// Clear all elements (keeps capacity)
+fpda_clear(numbers);
+
+fpda_free_and_null(numbers);
+```
+
+```{doxygendefine} fpda_reserve
+:project: fp_doxygen
+```
+
+```{doxygendefine} fpda_insert
+:project: fp_doxygen
+```
+
+```{doxygendefine} fpda_delete
+:project: fp_doxygen
+```
+
+```{doxygendefine} fpda_pop_back
+:project: fp_doxygen
+```
+
+```{doxygendefine} fpda_clear
+:project: fp_doxygen
+```
+
+## Advanced Dynamic Array Features
+
+```cpp
+fp_dynarray(float) data = NULL;
+
+// Grow and initialize
+fpda_grow_and_initialize(data, 10, 3.14f);
+
+// Swap elements
+fpda_swap(data, 0, 9);
+
+// Clone array
+fp_dynarray(float) copy = fpda_clone(data);
+
+// Concatenate arrays
+fpda_concatenate_in_place(data, copy);
+
+// Shrink to fit (free excess capacity)
+fpda_shrink_to_fit(data);
+
+fpda_free_and_null(data);
+fpda_free_and_null(copy);
+```
+
+```{doxygendefine} fpda_grow_and_initialize
+:project: fp_doxygen
+```
+
+```{doxygendefine} fpda_swap
+:project: fp_doxygen
+```
+
+```{doxygendefine} fpda_clone
+:project: fp_doxygen
+```
+
+```{doxygendefine} fpda_concatenate_in_place
+:project: fp_doxygen
+```
+
+```{doxygendefine} fpda_shrink_to_fit
+:project: fp_doxygen
+```
+
 ## Indices and Tables
 
 - {ref}`genindex`
