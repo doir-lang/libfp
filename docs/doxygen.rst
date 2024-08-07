@@ -5,6 +5,13 @@ Generated Documentation (C API)
    :project: fp_doxygen
    :content-only:
 
+Dynamic Arrays (C API)
+----------------------------------------------
+
+.. doxygengroup:: capi-dynarray
+   :project: fp_doxygen
+   :content-only:
+
 Generated Documentation (C++ API)
 =================================
 
