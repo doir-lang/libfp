@@ -6,6 +6,7 @@
 #include <fp/pointer.hpp>
 #include <fp/dynarray.hpp>
 #include <fp/string.hpp>
+#include <fp/hash/dictionary.hpp>
 
 TEST_SUITE("LibFP::C++") {
 
@@ -208,6 +209,14 @@ TEST_SUITE("LibFP::C++") {
 		auto utf8 = fp::raii::string::from_codepoints(cp);
 		cp.free_and_null();
 		CHECK(utf8 == "Hello, 世界");
+	}
+
+	TEST_CASE("Hash::Dictionary") {
+		fp::dictionary<int, fp::string_view> dictionary;
+		dictionary[2] = "hello";
+		dictionary[6] = "world";
+		CHECK(dictionary[2] == "hello");
+		CHECK(dictionary[6] == "world");
 	}
 
 }

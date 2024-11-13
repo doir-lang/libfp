@@ -1,7 +1,7 @@
-#ifndef __LIB_FAT_POINTER_HASH_H__
-#define __LIB_FAT_POINTER_HASH_H__
+#ifndef __LIB_FAT_POINTER_HASH_TABLE_H__
+#define __LIB_FAT_POINTER_HASH_TABLE_H__
 
-#include "dynarray.h"
+#include "../dynarray.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -10,7 +10,7 @@ extern "C" {
 #define fp_hashtable(type) fp_dynarray(type)
 
 #ifndef FP_HASH_FUNCTION // Defaults to FNV-1a
-	inline uint64_t __fp_hash_default(const fp_void_view view) FP_NOEXCEPT {
+	inline static uint64_t __fp_hash_default(const fp_void_view view) FP_NOEXCEPT {
 		constexpr uint64_t FNV_OFFSET_BASIS = 14695981039346656037u;
 		constexpr uint64_t FNV_PRIME = 1099511628211u;
 
@@ -23,27 +23,22 @@ extern "C" {
 	}
 	#define FP_HASH_FUNCTION __fp_hash_default
 #endif
-typedef uint64_t(*fp_hash_function_t)(const fp_void_view) FP_NOEXCEPT;
 
 #ifndef FP_HASH_COMPARE_EQUAL_FUNCTION
-#define FP_HASH_COMPARE_EQUAL_FUNCTION fp_view_compare_equal
+#define FP_HASH_COMPARE_EQUAL_FUNCTION fp_view_equal
 #endif
-typedef bool(*fp_hash_equal_function_t)(const fp_void_view, const fp_void_view) FP_NOEXCEPT;
 
 #ifndef FP_HASH_COPY_FUNCTION
 #define FP_HASH_COPY_FUNCTION memcpy
 #endif
-typedef void*(*fp_hash_copy_function_t)(void*, const void*, size_t) FP_NOEXCEPT;
 
 #ifndef FP_HASH_SWAP_FUNCTION
 #define FP_HASH_SWAP_FUNCTION memswap
 #endif
-typedef void*(*fp_hash_swap_function_t)(void*, void*, size_t) FP_NOEXCEPT;
 
 #ifndef FP_HASH_FINALIZE_FUNCTION
 #define FP_HASH_FINALIZE_FUNCTION NULL
 #endif
-typedef void(*fp_hash_finalize_function_t)(fp_void_view) FP_NOEXCEPT;
 
 #ifndef FP_HASH_MAX_LOAD_FACTOR
 #define FP_HASH_MAX_LOAD_FACTOR .95
@@ -61,21 +56,6 @@ typedef void(*fp_hash_finalize_function_t)(fp_void_view) FP_NOEXCEPT;
 
 struct __FatHashTableHeader { // The header itself is a fpda of u32s storing hop_info, the first 1 or 2 ptrsizes of which store hashes and hashers
 	fp_dynarray(size_t) hashes;
-#ifdef FP_HASH_DYNAMIC_HASH_FUNCTION
-	fp_hash_function_t hasher;
-#endif
-#ifdef FP_HASH_DYNAMIC_EQUALS_FUNCTION
-	fp_hash_equal_function_t equals;
-#endif
-#ifdef FP_HASH_DYNAMIC_COPY_FUNCTION
-	fp_hash_copy_function_t copier;
-#endif
-#ifdef FP_HASH_DYNAMIC_SWAP_FUNCTION
-	fp_hash_swap_function_t swapper;
-#endif
-#ifdef FP_HASH_DYNAMIC_FINALIZE_FUNCTION
-	fp_hash_finalize_function_t finalizer;
-#endif
 #ifndef __cplusplus
 	uint32_t hop_infos[];
 #else
@@ -83,61 +63,16 @@ struct __FatHashTableHeader { // The header itself is a fpda of u32s storing hop
 #endif
 };
 
-inline struct __FatHashTableHeader* __fp_hash_header(void* table) FP_NOEXCEPT {
+inline static struct __FatHashTableHeader* __fp_hash_header(void* table) FP_NOEXCEPT {
 	return (struct __FatHashTableHeader*)*(void**)table; // The first ptrsize bytes of the table is a pointer to the hash header
 }
 
-inline bool is_fp_hash(void* table) FP_NOEXCEPT { return fp_magic_number(table) == FP_HASH_MAGIC_NUMBER; }
+inline static bool is_fp_hash(void* table) FP_NOEXCEPT { return fp_magic_number(table) == FP_HASH_MAGIC_NUMBER; }
 #define is_fp_hashtable is_fp_hash
 
-#ifdef FP_HASH_DYNAMIC_HASH_FUNCTION
-inline fp_hash_function_t fp_hash_set_hash_function(void* table, fp_hash_function_t f) FP_NOEXCEPT {
-	return __fp_hash_header(table)->hasher = f;
-}
-inline fp_hash_function_t fp_hash_get_hash_function(void* table) FP_NOEXCEPT {
-	return __fp_hash_header(table)->hasher;
-}
-#endif
-
-#ifdef FP_HASH_DYNAMIC_EQUALS_FUNCTION
-inline fp_hash_equal_function_t fp_hash_set_equal_function(void* table, fp_hash_equal_function_t f) FP_NOEXCEPT {
-	return __fp_hash_header(table)->equals = f;
-}
-inline fp_hash_equal_function_t fp_hash_get_equal_function(void* table) FP_NOEXCEPT {
-	return __fp_hash_header(table)->equals;
-}
-#endif
-
-#ifdef FP_HASH_DYNAMIC_COPY_FUNCTION
-inline fp_hash_copy_function_t fp_hash_set_copy_function(void* table, fp_hash_copy_function_t f) FP_NOEXCEPT {
-	return __fp_hash_header(table)->copier = f;
-}
-inline fp_hash_copy_function_t fp_hash_get_copy_function(void* table) FP_NOEXCEPT {
-	return __fp_hash_header(table)->copier;
-}
-#endif
-
-#ifdef FP_HASH_DYNAMIC_SWAP_FUNCTION
-inline fp_hash_swap_function_t fp_hash_set_swap_function(void* table, fp_hash_swap_function_t f) FP_NOEXCEPT {
-	return __fp_hash_header(table)->swapper = f;
-}
-inline fp_hash_swap_function_t fp_hash_get_swap_function(void* table) FP_NOEXCEPT {
-	return __fp_hash_header(table)->swapper;
-}
-#endif
-
-#ifdef FP_HASH_DYNAMIC_FINALIZE_FUNCTION
-inline fp_hash_finalize_function_t fp_hash_set_finalize_function(void* table, fp_hash_finalize_function_t f) FP_NOEXCEPT {
-	return __fp_hash_header(table)->finalizer = f;
-}
-inline fp_hash_finalize_function_t fp_hash_get_finalize_function(void* table) FP_NOEXCEPT {
-	return __fp_hash_header(table)->finalizer;
-}
-#endif
 
 
-
-inline int16_t __fp_hash_elements_to_skip(size_t type_size) FP_NOEXCEPT {
+inline static int16_t __fp_hash_elements_to_skip(size_t type_size) FP_NOEXCEPT {
 	size_t pointersInType = sizeof(void*) / type_size;
 	if(pointersInType < 1) pointersInType = 1;
 	return pointersInType;
@@ -151,26 +86,10 @@ inline int16_t __fp_hash_elements_to_skip(size_t type_size) FP_NOEXCEPT {
 /**
 * @brief How many bytes from the front of the table to skip when iterating over the table's hop infos
 */
-inline int16_t fp_hash_infos_to_skip() FP_NOEXCEPT {
+inline static int16_t fp_hash_infos_to_skip() FP_NOEXCEPT {
 	size_t pointersInU32 = sizeof(void*) / sizeof(uint32_t);
 	if(pointersInU32 < 1) pointersInU32 = 1;
-	size_t sum = pointersInU32;
-#ifdef FP_HASH_DYNAMIC_HASH_FUNCTION
-	sum += pointersInU32; // There are two pointers we need to account for when we also need to store a function pointer
-#endif
-#ifdef FP_HASH_DYNAMIC_EQUALS_FUNCTION
-	sum += pointersInU32; // There are two pointers we need to account for when we also need to store a function pointer
-#endif
-#ifdef FP_HASH_DYNAMIC_COPY_FUNCTION
-	sum += pointersInU32; // There are two pointers we need to account for when we also need to store a function pointer
-#endif
-#ifdef FP_HASH_DYNAMIC_SWAP_FUNCTION
-	sum += pointersInU32; // There are two pointers we need to account for when we also need to store a function pointer
-#endif
-#ifdef FP_HASH_DYNAMIC_FINALIZE_FUNCTION
-	sum += pointersInU32; // There are two pointers we need to account for when we also need to store a function pointer
-#endif
-	return sum;
+	return pointersInU32;
 }
 
 // Offset from indecies into the elements array to indecies into the infos array // TODO: Is this always zero?
@@ -178,50 +97,37 @@ inline int16_t fp_hash_infos_to_skip() FP_NOEXCEPT {
 #define FP_HASH_ELEM2HASH_OFFSET(type_size) (-__fp_hash_elements_to_skip(type_size))
 
 // TODO: Are there any invariants we have that allow us to assume that we can just shift? instead of modulo?
-inline size_t __fp_hash_element_modulo(void* table, size_t n, size_t type_size) FP_NOEXCEPT {
+inline static size_t __fp_hash_element_modulo(void* table, size_t n, size_t type_size) FP_NOEXCEPT {
 	return __fp_hash_elements_to_skip(type_size) + n % (fpda_size(table) - __fp_hash_elements_to_skip(type_size));
 }
 
 
 
-inline uint32_t* __fp_hash_entry_hop_info(void* table, size_t index) FP_NOEXCEPT {
+inline static uint32_t* __fp_hash_entry_hop_info(void* table, size_t index) FP_NOEXCEPT {
 	assert(is_fp_hash(table));
 	assert(__fp_hash_header(table)->hop_infos != NULL);
 	assert(fpda_size(__fp_hash_header(table)) > index);
 	return ((uint32_t*)__fp_hash_header(table)) + index;
 }
 
-inline bool __fp_hash_entry_is_occupied(void* table, size_t index) FP_NOEXCEPT {
+inline static bool __fp_hash_entry_is_occupied(void* table, size_t index) FP_NOEXCEPT {
 	return *__fp_hash_entry_hop_info(table, index) & (1 << 31);
 }
 
-inline void __fp_hash_entry_set_occupied(void* table, size_t index, bool value) FP_NOEXCEPT {
+inline static void __fp_hash_entry_set_occupied(void* table, size_t index, bool value) FP_NOEXCEPT {
 	if(value) *__fp_hash_entry_hop_info(table, index) |= (1 << 31);
 	else *__fp_hash_entry_hop_info(table, index) &= ~(1 << 31);
 }
 
-inline size_t* __fp_hash_entry_hash(void* table, size_t index) FP_NOEXCEPT {
+inline static size_t* __fp_hash_entry_hash(void* table, size_t index) FP_NOEXCEPT {
 	assert(is_fp_hash(table));
 	assert(__fp_hash_header(table)->hashes != NULL);
 	assert(fpda_size(__fp_hash_header(table)->hashes) > index);
 	return __fp_hash_header(table)->hashes + index;
 }
 
-inline void __fp_hash_free(void* table, size_t type_size) FP_NOEXCEPT {
+inline static void __fp_hash_free(void* table, size_t type_size) FP_NOEXCEPT {
 	auto h = __fp_hash_header(table);
-
-	// If the table has a (nonnull) finalizer, finalize every occupied element
-#ifdef FP_HASH_DYNAMIC_FINALIZE_FUNCTION
-	if(type_size > 0 && h->finalizer) {
-		int16_t infoOffset = FP_HASH_ELEM2INFO_OFFSET(type_size);
-		int16_t hashOffset = FP_HASH_ELEM2HASH_OFFSET(type_size);
-
-		char* tableC = (char*)table;
-		for(size_t i = __fp_hash_elements_to_skip(type_size), size = fpda_size(table); i < size; ++i)
-			if(__fp_hash_entry_is_occupied(table, i + infoOffset))
-				h->finalizer(fp_void_view_literal(tableC + i * type_size, type_size));
-	}
-#endif
 
 	// We need to be sure to free all of the allocated side structures!
 	if(h->hashes) fpda_free(h->hashes);
@@ -239,11 +145,7 @@ size_t __fp_hash(void* table, fp_void_view key, size_t type_size) FP_NOEXCEPT
 #ifdef FP_IMPLEMENTATION
 {
 	assert(fp_view_size(key) == type_size);
-#ifdef FP_HASH_DYNAMIC_HASH_FUNCTION
-	return __fp_hash_element_modulo(table, __fp_hash_header(table)->hasher(key), type_size);
-#else
 	return __fp_hash_element_modulo(table, FP_HASH_FUNCTION(key), type_size);
-#endif
 }
 #else
 ;
@@ -257,34 +159,22 @@ size_t __fp_hash(void* table, fp_void_view key, size_t type_size) FP_NOEXCEPT
 */
 #define fp_hash(type, table, key) __fp_hash(table, fp_variable_to_void_view(type, key), sizeof(type))
 
-inline bool __fp_hash_compare_equal(void* table, fp_void_view a, fp_void_view b) FP_NOEXCEPT {
+inline static bool __fp_hash_compare_equal(void* table, fp_void_view a, fp_void_view b) FP_NOEXCEPT {
 	assert(fp_view_size(a) == fp_view_size(b));
-#ifdef FP_HASH_DYNAMIC_EQUALS_FUNCTION
-	return __fp_hash_header(table)->equals(a, b);
-#else
 	return FP_HASH_COMPARE_EQUAL_FUNCTION(a, b);
-#endif
 }
 
-inline bool __fp_hash_copy(void* table, void* a, void* b, size_t n) FP_NOEXCEPT {
-#ifdef FP_HASH_DYNAMIC_COPY_FUNCTION
-	return __fp_hash_header(table)->copier(a, b, n);
-#else
+inline static bool __fp_hash_copy(void* table, void* a, void* b, size_t n) FP_NOEXCEPT {
 	return FP_HASH_COPY_FUNCTION(a, b, n);
-#endif
 }
 
-inline bool __fp_hash_swap(void* table, void* a, void* b, size_t n) FP_NOEXCEPT {
-#ifdef FP_HASH_DYNAMIC_SWAP_FUNCTION
-	return __fp_hash_header(table)->swapper(a, b, n);
-#else
+inline static bool __fp_hash_swap(void* table, void* a, void* b, size_t n) FP_NOEXCEPT {
 	return FP_HASH_SWAP_FUNCTION(a, b, n);
-#endif
 }
 
-inline size_t __fp_hash_invalid_position() FP_NOEXCEPT { return -1; }
+inline static size_t __fp_hash_invalid_position() FP_NOEXCEPT { return -1; }
 
-inline size_t __fp_hash_find_position(void* table, const void* _key, size_t type_size) FP_NOEXCEPT {
+inline static size_t __fp_hash_find_position(void* table, const void* _key, size_t type_size) FP_NOEXCEPT {
 	int16_t infoOffset = FP_HASH_ELEM2INFO_OFFSET(type_size);
 	int16_t hashOffset = FP_HASH_ELEM2HASH_OFFSET(type_size);
 	assert(table); assert(!fp_empty(table));
@@ -303,7 +193,7 @@ inline size_t __fp_hash_find_position(void* table, const void* _key, size_t type
 	return __fp_hash_invalid_position();
 }
 
-inline size_t __fp_hash_find_empty_spot(void* table, size_t start, size_t type_size) FP_NOEXCEPT {
+inline static size_t __fp_hash_find_empty_spot(void* table, size_t start, size_t type_size) FP_NOEXCEPT {
 	int16_t infoOffset = FP_HASH_ELEM2INFO_OFFSET(type_size);
 	int16_t hashOffset = FP_HASH_ELEM2HASH_OFFSET(type_size);
 	if(!table || fp_empty(table)) return __fp_hash_invalid_position(); // Needed because this function gets called at the start of insert to indicate that we should rehash!
@@ -316,7 +206,7 @@ inline size_t __fp_hash_find_empty_spot(void* table, size_t start, size_t type_s
 	return __fp_hash_invalid_position();
 }
 
-inline size_t __fp_hash_find_nearest_neighbor(void* table, size_t start, size_t type_size) FP_NOEXCEPT {
+inline static size_t __fp_hash_find_nearest_neighbor(void* table, size_t start, size_t type_size) FP_NOEXCEPT {
 	int16_t infoOffset = FP_HASH_ELEM2INFO_OFFSET(type_size);
 	int16_t hashOffset = FP_HASH_ELEM2HASH_OFFSET(type_size);
 	assert(table); assert(!fp_empty(table));
@@ -329,7 +219,7 @@ inline size_t __fp_hash_find_nearest_neighbor(void* table, size_t start, size_t 
 	return __fp_hash_invalid_position();
 }
 
-inline bool __fp_hash_is_in_neighborhood(void* table, size_t start, size_t needle, size_t type_size) FP_NOEXCEPT {
+inline static bool __fp_hash_is_in_neighborhood(void* table, size_t start, size_t needle, size_t type_size) FP_NOEXCEPT {
 	int16_t infoOffset = FP_HASH_ELEM2INFO_OFFSET(type_size);
 	int16_t hashOffset = FP_HASH_ELEM2HASH_OFFSET(type_size);
 	assert(table); assert(!fp_empty(table));
@@ -343,7 +233,7 @@ inline bool __fp_hash_is_in_neighborhood(void* table, size_t start, size_t needl
 }
 
 // This function requires a linear scan over all the cells to determine how many are occupied
-inline size_t __fp_hash_size(void* table, size_t type_size) FP_NOEXCEPT {
+inline static size_t __fp_hash_size(void* table, size_t type_size) FP_NOEXCEPT {
 	int16_t infoOffset = FP_HASH_ELEM2INFO_OFFSET(type_size);
 	int16_t hashOffset = FP_HASH_ELEM2HASH_OFFSET(type_size);
 	assert(table); assert(!fp_empty(table));
@@ -400,25 +290,6 @@ void __fp_hash_double_size(void** table, bool store_hashes_while_initializing, s
 	*table = p;
 
 	__fp_hash_ensure_extra_information_size(*table, newSize, store_hashes_while_initializing, initalizing);
-
-	struct __FatHashTableHeader* h = __fp_hash_header(*table);
-	if(initalizing) {
-#ifdef FP_HASH_DYNAMIC_HASH_FUNCTION
-		h->hasher = FP_HASH_FUNCTION;
-#endif
-#ifdef FP_HASH_DYNAMIC_EQUALS_FUNCTION
-		h->equals = FP_HASH_COMPARE_EQUAL_FUNCTION;
-#endif
-#ifdef FP_HASH_DYNAMIC_COPY_FUNCTION
-		h->copier = FP_HASH_COPY_FUNCTION;
-#endif
-#ifdef FP_HASH_DYNAMIC_SWAP_FUNCTION
-		h->swapper = FP_HASH_SWAP_FUNCTION;
-#endif
-#ifdef FP_HASH_DYNAMIC_SWAP_FUNCTION
-		h->finalizer = FP_HASH_FINALIZE_FUNCTION;
-#endif
-	}
 }
 #else
 ;
@@ -426,7 +297,7 @@ void __fp_hash_double_size(void** table, bool store_hashes_while_initializing, s
 #define fp_hash_create_empty_table(type, table, store_hashes_while_initializing) __fp_hash_double_size((void**)&table, store_hashes_while_initializing, sizeof(type))
 
 
-inline bool __fp_hash_double_size_and_rehash(void** table, bool store_hashes_while_initializing, size_t retries /*= 0*/, size_t type_size) FP_NOEXCEPT;
+inline static bool __fp_hash_double_size_and_rehash(void** table, bool store_hashes_while_initializing, size_t retries /*= 0*/, size_t type_size) FP_NOEXCEPT;
 
 bool __fp_hash_rehash(void** table, bool store_hashes_while_initializing, size_t retries /*= 0*/, bool resized /*= false*/, size_t type_size) FP_NOEXCEPT
 #ifdef FP_IMPLEMENTATION
@@ -493,13 +364,13 @@ bool __fp_hash_rehash(void** table, bool store_hashes_while_initializing, size_t
 #endif
 #define fp_hash_rehash(type, table, store_hashes_while_initializing) __fp_hash_double_size_and_rehash((void**)&table, store_hashes_while_initializing, 0, false, sizeof(type))
 
-inline bool __fp_hash_double_size_and_rehash(void** table, bool store_hashes_while_initializing, size_t retries /*= 0*/, size_t type_size) FP_NOEXCEPT {
+inline static bool __fp_hash_double_size_and_rehash(void** table, bool store_hashes_while_initializing, size_t retries /*= 0*/, size_t type_size) FP_NOEXCEPT {
 	__fp_hash_double_size(table, store_hashes_while_initializing, type_size);
 	return __fp_hash_rehash(table, store_hashes_while_initializing, retries, true, type_size);
 }
 #define fp_hash_double_size_and_rehash(type, table, store_hashes_while_initializing) __fp_hash_double_size_and_rehash((void**)&table, store_hashes_while_initializing, 0, sizeof(type))
 
-inline void* __fp_hash_insert(void** table, void* key, bool store_hashes_while_initializing, size_t type_size, size_t retries /*= 0*/) {
+inline static void* __fp_hash_insert(void** table, void* key, bool store_hashes_while_initializing, size_t type_size, size_t retries /*= 0*/) {
 	int16_t infoOffset = FP_HASH_ELEM2INFO_OFFSET(type_size);
 	int16_t hashOffset = FP_HASH_ELEM2HASH_OFFSET(type_size);
 	size_t hash = *table ? __fp_hash(*table, fp_void_view_literal(key, type_size), type_size) : 0;
@@ -525,7 +396,7 @@ inline void* __fp_hash_insert(void** table, void* key, bool store_hashes_while_i
 #define fp_hash_insert_store_hashes(type, table, key, store_hashes_while_initializing) ((type*)__fp_hash_insert((void**)&table, &key, (store_hashes_while_initializing), sizeof(type), 0))
 #define fp_hash_insert(type, table, key) fp_hash_insert_store_hashes(type, table, key, false)
 
-inline void* __fp_hash_find(void* table, const void* key, size_t type_size) FP_NOEXCEPT {
+inline static void* __fp_hash_find(void* table, const void* key, size_t type_size) FP_NOEXCEPT {
 	size_t index = __fp_hash_find_position(table, key, type_size);
 	if(index == __fp_hash_invalid_position()) return NULL;
 	return ((char*)table) + index * type_size;
@@ -534,14 +405,14 @@ inline void* __fp_hash_find(void* table, const void* key, size_t type_size) FP_N
 #define fp_hash_find_index(type, table, key) ((size_t)(fp_hash_find(type, (table), key) - (table)))
 #define fp_hash_contains(type, table, key) (__fp_hash_find((table), &key, sizeof(type)) != NULL)
 
-inline void* __fp_hash_rehash_and_find(void** table, const void* key, size_t type_size) FP_NOEXCEPT {
+inline static void* __fp_hash_rehash_and_find(void** table, const void* key, size_t type_size) FP_NOEXCEPT {
 	if(!__fp_hash_rehash(table, false, 0, false, type_size)) return NULL;
 	return __fp_hash_find(*table, key, type_size);
 }
 #define fp_hash_rehash_and_find(type, table, key) ((type*)__fp_hash_find((void**)&table, &key, sizeof(type)))
 #define fp_hash_rehash_and_find_index(type, table, key) ((size_t)(fp_hash_find(type, table, key) - table))
 
-inline void* __fp_hash_insert_or_replace(void** table, void* key, size_t type_size) FP_NOEXCEPT {
+inline static void* __fp_hash_insert_or_replace(void** table, void* key, size_t type_size) FP_NOEXCEPT {
 	auto res = __fp_hash_find(*table, key, type_size);
 	if(!res) res = __fp_hash_insert(table, key, false, type_size, 0);
 	// By always copying, we allow for maps where we only compare/hash half the key, this updates the value half
@@ -550,7 +421,7 @@ inline void* __fp_hash_insert_or_replace(void** table, void* key, size_t type_si
 }
 #define fp_hash_insert_or_replace(type, table, key) ((type*)__fp_hash_insert_or_replace((void**)&table, &key, sizeof(type)))
 
-inline void* __fp_hash_convert_array(void* a, size_t starting_offset, bool store_hashes_while_initializing, bool free_original, bool type_size_considered_by_array, size_t type_size, void* table /*= nullptr*/) {
+inline static void* __fp_hash_convert_array(void* a, size_t starting_offset, bool store_hashes_while_initializing, bool free_original, bool type_size_considered_by_array, size_t type_size, void* table /*= nullptr*/) {
 	if(!is_fp(a)) return nullptr;
 	if(is_fp_hash(a)) return a; // TODO: Should we always rehash when you call this function?
 
@@ -577,4 +448,4 @@ inline void* __fp_hash_convert_array(void* a, size_t starting_offset, bool store
 }
 #endif
 
-#endif // __LIB_FAT_POINTER_HASH_H__
+#endif // __LIB_FAT_POINTER_HASH_TABLE_H__
