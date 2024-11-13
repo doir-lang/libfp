@@ -2,7 +2,8 @@
 #include <fp/pointer.h>
 #include <fp/dynarray.h>
 #include <fp/string.h>
-#include <fp/hash.h>
+#include <fp/hash/table.h>
+#include <fp/hash/map.h>
 
 // void* __heap_end;
 
