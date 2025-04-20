@@ -237,6 +237,7 @@ enum FP_MagicNumbers {
 	FP_HEAP_MAGIC_NUMBER = 0xFEFE,      ///< Heap-allocated fat pointer
 	FP_STACK_MAGIC_NUMBER = 0xFEFF,     ///< Stack-allocated fat pointer
 	FP_DYNARRAY_MAGIC_NUMBER = 0xFEFD,  ///< Dynamic array fat pointer
+	FP_HASH_MAGIC_NUMBER = 0xFEFC,
 };
 
 /// @cond INTERNAL
