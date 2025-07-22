@@ -11,6 +11,7 @@
 #include <fp/string.h>
 #include <fp/hash/table.h>
 #include <fp/hash/dictionary.hpp>
+#include <fp/bitmask.h>
 
 extern "C" {
 void check_stack();
@@ -484,6 +485,68 @@ TEST_SUITE("LibFP") {
 		CHECK(fp_hash_find(int, hashtable, key) == nullptr);
 
 		fp_hash_free(hashtable);
+	}
+
+	TEST_CASE("Bitmask") {
+		fp_bitmask_t mask = nullptr;
+		fp_bitmask_init(mask);
+		CHECK(fp_bitmask_find_highest_set(mask) == 0);
+		auto s = fp_bitmask_to_string(mask);
+		CHECK(strcmp(s, "0") == 0);
+		// puts(s);
+		fpda_free(s);
+
+		fp_bitmask_set(mask, 5);
+		fp_bitmask_set(mask, 6);
+		fp_bitmask_set(mask, 7);
+		CHECK(fp_bitmask_find_highest_set(mask) == 7);
+		CHECK(strcmp(s = fp_bitmask_to_string(mask), "11100000") == 0);
+		// puts(s);
+		fpda_free(s);
+
+		fp_bitmask_reset(mask, 6);
+		CHECK(fp_bitmask_find_highest_set(mask) == 7);
+		CHECK(strcmp(s = fp_bitmask_to_string(mask), "10100000") == 0);
+		// puts(s);
+		fpda_free(s);
+
+		fp_bitmask_set(mask, 60);
+		fp_bitmask_set(mask, 61);
+		CHECK(fp_bitmask_find_highest_set(mask) == 61);
+		CHECK(strcmp(s = fp_bitmask_to_string(mask), "11000000000000000000000000000000000000000000000000000010100000") == 0);
+		
+		fp_bitmask_set(mask, 120);
+		fp_bitmask_set(mask, 121);
+		CHECK(fp_bitmask_find_highest_set(mask) == 121);
+		
+		// puts(s);
+		fpda_free(s);
+		CHECK(strcmp(s = fp_bitmask_to_string_extended(mask, 0, 10), "0010100000") == 0);
+		// puts(s);
+		fpda_free(s);
+
+		fp_bitmask_free(mask);
+	}
+
+	TEST_CASE("Bitmask Round-Trip") {
+		fp_bitmask_t mask = nullptr;
+		fp_bitmask_init(mask);
+
+		char* str = (char*)"100110", *res;
+		fp_bitmask_from_binary_string(mask, str);
+		CHECK(fp_bitmask_test(mask, 0) == false);
+		CHECK(fp_bitmask_test(mask, 1) == true);
+		CHECK(fp_bitmask_test(mask, 2) == true);
+		CHECK(fp_bitmask_test(mask, 3) == false);
+		CHECK(fp_bitmask_test(mask, 4) == false);
+		CHECK(fp_bitmask_test(mask, 5) == true);
+		CHECK(fp_bitmask_test(mask, 6) == false); // One more for good measure!
+		CHECK(fp_bitmask_find_highest_set(mask) == 5);
+		CHECK(strcmp(res = fp_bitmask_to_string(mask), str) == 0);
+		// puts(res);
+
+		fpda_free(res);
+		fp_bitmask_free(mask);
 	}
 
 #if !(defined _MSC_VER || defined __APPLE__)

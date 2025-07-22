@@ -4,6 +4,7 @@
 #include <fp/string.h>
 #include <fp/hash/table.h>
 #include <fp/hash/map.h>
+#include <fp/bitmask.h>
 
 // void* __heap_end;
 
