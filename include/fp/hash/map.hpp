@@ -3,6 +3,8 @@
 #include "../dynarray.hpp"
 #include "map.h"
 
+#include <functional>
+
 namespace fp {
 
 	namespace detail {
