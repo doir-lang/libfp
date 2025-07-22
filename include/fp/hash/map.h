@@ -547,6 +547,7 @@ inline static void* __fp_hash_map_rehash_and_find(void** table, const void* key,
 inline static void* __fp_hash_map_insert_or_replace(void** table, void* key, size_t type_size) FP_NOEXCEPT {
 	auto res = __fp_hash_map_find(*table, key, type_size);
 	if(!res) res = __fp_hash_map_insert(table, key, false, type_size, 0);
+	if(!res) return res; // Failed to insert!
 	// By always copying, we allow for maps where we only compare/hash half the key, this updates the value half
 	__fp_hash_map_copy(*table, res, key, type_size);
 	return res;
