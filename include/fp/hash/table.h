@@ -10,18 +10,8 @@ extern "C" {
 #define fp_hashtable(type) fp_dynarray(type)
 
 #ifndef FP_HASH_FUNCTION // Defaults to FNV-1a
-	inline static uint64_t __fp_hash_default(const fp_void_view view) FP_NOEXCEPT {
-		constexpr uint64_t FNV_OFFSET_BASIS = 14695981039346656037u;
-		constexpr uint64_t FNV_PRIME = 1099511628211u;
-
-		uint64_t hash = FNV_OFFSET_BASIS;
-		for(size_t i = fp_view_size(view); i--; ) {
-			hash ^= (uint64_t)fp_view_data(char, view)[i];
-			hash *= FNV_PRIME;
-		}
-		return hash;
-	}
-	#define FP_HASH_FUNCTION __fp_hash_default
+	#include "fnv1a.h"
+	#define FP_HASH_FUNCTION fp_fnv1a_hash_void
 #endif
 
 #ifndef FP_HASH_COMPARE_EQUAL_FUNCTION
