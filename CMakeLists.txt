@@ -1,7 +1,11 @@
 cmake_minimum_required(VERSION 3.21)
 project(libfp LANGUAGES C CXX)
 
+include(CMakeDependentOption)
+
 option(FP_ENABLE_TESTS "Weather or not Unit Tests should be built." ${PROJECT_IS_TOP_LEVEL})
+cmake_dependent_option(FP_ENABLE_BENCHMARKING "Weather benchmarking should be enabled for the tests." ${PROJECT_IS_TOP_LEVEL} FP_ENABLE_TESTS OFF)
+cmake_dependent_option(FP_ENABLE_PROFILING "Weather profiling should be enabled for the tests." ${PROJECT_IS_TOP_LEVEL} FP_ENABLE_TESTS OFF)
 option(FP_FETCH_EXTERNAL_CPPSTL "Weather or not a minimal version of the C++ Standard Template Library should be fetched (Useful for embedded targets)" OFF)
 
 # set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=address -Wall")
@@ -49,11 +53,40 @@ if(${FP_ENABLE_TESTS})
 	set_property(TARGET tst-libfp PROPERTY CXX_STANDARD 23)
 	set_property(TARGET tst-libfp PROPERTY C_STANDARD 23)
 
-	FetchContent_Declare(fetch_cmake_scripts GIT_REPOSITORY https://github.com/StableCoder/cmake-scripts GIT_TAG origin/main GIT_SHALLOW true)
-	FetchContent_MakeAvailable(fetch_cmake_scripts)
+	if(${FP_ENABLE_BENCHMARKING})
+		if(TARGET nanobench)
+		else()
+			FetchContent_Declare(fetch_nanobench GIT_REPOSITORY https://github.com/martinus/nanobench.git GIT_SHALLOW true)
+			FetchContent_MakeAvailable(fetch_nanobench)
+		endif()
 
-	include(${fetch_cmake_scripts_SOURCE_DIR}/code-coverage.cmake)
-	target_code_coverage(tst-libfp)
+		target_link_libraries(tst-libfp PUBLIC nanobench)
+		target_compile_definitions(tst-libfp PUBLIC FP_ENABLE_BENCHMARKING)
+	endif()
+
+	if(${FP_ENABLE_PROFILING})
+		option(BUILD_TRACY_PROFILER "Weather or not to build the server needed to view trace results." OFF)
+
+		if(TARGET TracyClient)
+		else()
+			FetchContent_Declare(fetch_tracy GIT_REPOSITORY https://github.com/wolfpld/tracy GIT_SHALLOW true)
+			FetchContent_MakeAvailable(fetch_tracy)
+		endif()
+
+		target_link_libraries(tst-libfp PUBLIC TracyClient)
+		target_compile_definitions(tst-libfp PUBLIC FP_ENABLE_PROFILING)
+
+		if(${BUILD_TRACY_PROFILER})
+			# set(LEGACY ON CACHE BOOL "Instead of Wayland, use the legacy X11 backend on Linux")
+			add_subdirectory(${fetch_tracy_SOURCE_DIR}/profiler/)
+		endif()
+	endif()
+
+	# FetchContent_Declare(fetch_cmake_scripts GIT_REPOSITORY https://github.com/StableCoder/cmake-scripts GIT_TAG origin/main GIT_SHALLOW true)
+	# FetchContent_MakeAvailable(fetch_cmake_scripts)
+
+	# include(${fetch_cmake_scripts_SOURCE_DIR}/code-coverage.cmake)
+	# target_code_coverage(tst-libfp)
 
 	# include(${fetch_cmake_scripts_SOURCE_DIR}/sanitizers.cmake)
 	# add_sanitizer_support(address)
