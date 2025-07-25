@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../dynarray.hpp"
+#include "fnv1a.hpp"
 #include "map.h"
 
 #include <functional>
@@ -43,7 +44,7 @@ namespace fp {
 	struct hash_map: public fp::dynarray<detail::pair_type<Tkey, Tvalue>> {
 	protected:
 		using pair_type = detail::pair_type<Tkey, Tvalue>;
-		constexpr static auto hash_function = std::conditional_t<std::is_same_v<Hash, void>, std::hash<Tkey>, Hash>{};
+		constexpr static auto hash_function = std::conditional_t<std::is_same_v<Hash, void>, fp::fnv1a<Tkey>, Hash>{};
 		constexpr static auto equal_function = std::conditional_t<std::is_same_v<Equal, void>, std::equal_to<Tkey>, Hash>{};
 
 		static uint64_t _fp_hash(const fp_void_view view) FP_NOEXCEPT {
