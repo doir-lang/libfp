@@ -23,13 +23,13 @@ namespace fp {
 		struct pointer {
 			T* raw;
 
-			pointer(): raw(nullptr) {}
-			pointer(std::nullptr_t): raw(nullptr) {}
-			pointer(T* ptr_): raw(ptr_) {}
-			pointer(const pointer& o) = default;
-			pointer(pointer&& o): raw(std::exchange(o.raw, nullptr)) {}
-			pointer& operator=(const pointer& o) = default;
-			pointer& operator=(pointer&& o) { raw = std::exchange(o.raw, nullptr); return *this; }
+			constexpr pointer(): raw(nullptr) {}
+			constexpr pointer(std::nullptr_t): raw(nullptr) {}
+			constexpr pointer(T* ptr_): raw(ptr_) {}
+			constexpr pointer(const pointer& o) = default;
+			constexpr pointer(pointer&& o): raw(std::exchange(o.raw, nullptr)) {}
+			constexpr pointer& operator=(const pointer& o) = default;
+			constexpr pointer& operator=(pointer&& o) { raw = std::exchange(o.raw, nullptr); return *this; }
 
 			inline operator pointer<std::add_const_t<T>>() const { return *(pointer<std::add_const_t<T>>*)this; }
 
@@ -62,12 +62,12 @@ namespace fp {
 
 	template<typename T>
 	struct view: public fp_view(T) {
-		view(T* data = nullptr, size_t size = 0): fp_view(T)(fp_view_literal(T, data, size)) {}
-		view(fp_view(T) o) : fp_view(T)(o) {}
-		view(const view&) = default;
-		view(view&&) = default;
-		view& operator=(const view&) = default;
-		view& operator=(view&&) = default;
+		constexpr view(T* data = nullptr, size_t size = 0): fp_view(T)(fp_view_literal(T, data, size)) {}
+		constexpr view(fp_view(T) o) : fp_view(T)(o) {}
+		constexpr view(const view&) = default;
+		constexpr view(view&&) = default;
+		constexpr view& operator=(const view&) = default;
+		constexpr view& operator=(view&&) = default;
 
 		inline operator view<std::add_const_t<T>>() const { return *(view<std::add_const_t<T>>*)this; }
 		fp_view(T)& raw() { return *this; }
@@ -206,6 +206,11 @@ namespace fp {
 		inline view_t full_view() { return view_t::make_full(ptr()); }
 		inline view_t view_start_end(size_t start, size_t end) { return view_t::make_start_end(ptr(), start, end); }
 
+		inline const view_t view(size_t start, size_t length) const { return view_t::make((T*)ptr(), start, length); }
+		inline const view_t view_full() const { return view_t::make_full((T*)ptr()); }
+		inline const view_t full_view() const { return view_t::make_full((T*)ptr()); }
+		inline const view_t view_start_end(size_t start, size_t end) const { return view_t::make_start_end((T*)ptr(), start, end); }
+
 		inline T& front() { return *fp_front(ptr()); }
 		inline T& back() { return *fp_back(ptr()); }
 
@@ -266,7 +271,7 @@ namespace fp {
 		using wrapped::pointer<T>::raw;
 		using pointer_crtp<T, pointer<T>>::data;
 
-		pointer(T* ptr_): wrapped::pointer<T>(ptr_) { assert(ptr_ == nullptr || this->is_fp()); }
+		constexpr pointer(T* ptr_): wrapped::pointer<T>(ptr_) { assert(ptr_ == nullptr || this->is_fp()); }
 		inline operator pointer<std::add_const_t<T>>() const { return *(pointer<std::add_const_t<T>>*)this; }
 
 		inline void free() { fp_free(raw); }
@@ -286,15 +291,15 @@ namespace fp {
 		struct pointer: public fp::pointer<T> {
 			using super = fp::pointer<T>;
 			// using super::super;
-			pointer(): super(nullptr) {}
-			pointer(std::nullptr_t): super(nullptr) {}
-			pointer(T* ptr): super(ptr) {}
-			pointer(const super& o): super(o.clone()) {}
-			pointer(super&& o): super(std::exchange(o.raw, nullptr)) {}
-			pointer(const pointer& o): super(o.clone()) {}
-			pointer(pointer&& o): super(std::exchange(o.raw, nullptr)) {}
-			pointer& operator=(const pointer& o) { if(super::raw) super::free(); super::raw = o.clone(); return *this;}
-			pointer& operator=(pointer&& o) { if(super::raw) super::free(); super::raw = std::exchange(o.raw, nullptr); return *this; }
+			constexpr pointer(): super(nullptr) {}
+			constexpr pointer(std::nullptr_t): super(nullptr) {}
+			constexpr pointer(T* ptr): super(ptr) {}
+			constexpr pointer(const super& o): super(o.clone()) {}
+			constexpr pointer(super&& o): super(std::exchange(o.raw, nullptr)) {}
+			constexpr pointer(const pointer& o): super(o.clone()) {}
+			constexpr pointer(pointer&& o): super(std::exchange(o.raw, nullptr)) {}
+			constexpr pointer& operator=(const pointer& o) { if(super::raw) super::free(); super::raw = o.clone(); return *this;}
+			constexpr pointer& operator=(pointer&& o) { if(super::raw) super::free(); super::raw = std::exchange(o.raw, nullptr); return *this; }
 			~pointer() { if(super::raw) super::free_and_null(); }
 
 			inline operator pointer<std::add_const_t<T>>() const { return *(pointer<std::add_const_t<T>>*)this; }
@@ -317,11 +322,24 @@ namespace fp {
 
 	template<typename T, size_t N>
 	struct array: public pointer_crtp<T, array<T, N>> {
-		__FatPointerHeaderTruncated __header = {
+		constexpr static __FatPointerHeaderTruncated __default_header = {
 			.magic = FP_STACK_MAGIC_NUMBER,
 			.size = N,
 		};
+		__FatPointerHeaderTruncated __header = __default_header;
 		T raw[N];
+
+		constexpr array() = default;
+		constexpr array(const array&) = default;
+		constexpr array(array&&) = default;
+		constexpr array& operator=(const array&) = default;
+		constexpr array& operator=(array&&) = default;
+		constexpr array(std::initializer_list<T> init): __header(__default_header) {
+			assert(init.size() == __header.size);
+			size_t i = 0;
+			for(auto& ini: init)
+				raw[i++] = std::move(ini);
+		}
 
 		inline operator array<std::add_const_t<T>, N>() const { return *(array<std::add_const_t<T>, N>*)this; }
 
