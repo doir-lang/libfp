@@ -155,6 +155,12 @@ namespace fp {
 		// using super::operator=;
 		using super::ptr;
 
+		dynarray(std::initializer_list<T> init) {
+			crtp::reserve(init.size());
+			for(auto& i: init)
+				crtp::push_back(std::move(i));
+		}
+
 		using crtp = dynarray_crtp<T, dynarray<T>>;
 		using crtp::free;
 		using crtp::free_and_null;
@@ -169,19 +175,25 @@ namespace fp {
 			using super = raii::pointer<T>;
 			using super::ptr;
 
+			constexpr dynarray(std::initializer_list<T> init) {
+				crtp::reserve(init.size());
+				for(auto& i: init)
+					crtp::push_back(std::move(i));
+			}
+
 			using crtp = dynarray_crtp<T, raii::dynarray<T>>;
 			using crtp::free;
 			using crtp::free_and_null;
 			using crtp::clone;
 
-			dynarray(): super(nullptr) {}
-			dynarray(T* ptr): super(ptr) {}
-			dynarray(const fp::dynarray<T>& o): super(std::move(o.clone())) {}
-			dynarray(fp::dynarray<T>&& o): super(std::exchange(o.raw, nullptr)) {}
-			dynarray(const dynarray& o): super(std::move(o.clone())) {}
-			dynarray(dynarray&& o): super(std::exchange(o.raw, nullptr)) {}
-			dynarray& operator=(const dynarray& o) { if(super::raw) crtp::free(); super::raw = o.clone(); return *this;}
-			dynarray& operator=(dynarray&& o) { if(super::raw) crtp::free(); super::raw = std::exchange(o.raw, nullptr); return *this; }
+			constexpr dynarray(): super(nullptr) {}
+			constexpr dynarray(T* ptr): super(ptr) {}
+			constexpr dynarray(const fp::dynarray<T>& o): super(std::move(o.clone())) {}
+			constexpr dynarray(fp::dynarray<T>&& o): super(std::exchange(o.raw, nullptr)) {}
+			constexpr dynarray(const dynarray& o): super(std::move(o.clone())) {}
+			constexpr dynarray(dynarray&& o): super(std::exchange(o.raw, nullptr)) {}
+			constexpr dynarray& operator=(const dynarray& o) { if(super::raw) crtp::free(); super::raw = o.clone(); return *this;}
+			constexpr dynarray& operator=(dynarray&& o) { if(super::raw) crtp::free(); super::raw = std::exchange(o.raw, nullptr); return *this; }
 			~dynarray() { if(super::raw) crtp::free_and_null(); }
 
 			inline operator dynarray<std::add_const_t<T>>() const { return *(dynarray<std::add_const_t<T>>*)this; }
