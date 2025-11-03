@@ -12,7 +12,7 @@ namespace fp {
 
 		Tvalue& operator[](const Tkey& key) {
 			if(!super::contains(key))
-				return super::insert(key)->second;
+				return super::insert(detail::pair_type<Tkey, Tvalue>{key, {}})->second;
 			return super::find(key)->second;
 		}
 	};

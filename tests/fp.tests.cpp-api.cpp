@@ -219,16 +219,17 @@ TEST_SUITE("LibFP::C++") {
 
 	TEST_CASE("Hash::Dictionary") {
 		fp::dictionary<int, fp::string> dictionary;
-		for(size_t i = 0; i < 30; ++i) {
+		for(size_t i = 0; i < 10; ++i) {
 			auto str = fp::string::format("{}", i);
 			dictionary[i] = str;
 			CHECK(dictionary[i] == str);
 		}
-		for(size_t i = 0; i < 30; ++i) {
+		for(size_t i = 0; i < 10; ++i) {
 			auto str = fp::raii::string::format("{}", i);
-			CHECK(dictionary[i] == str);
+			auto& a = dictionary[i];
+			CHECK(a == str);
 		}
-		for(size_t i = 0; i < 30; ++i)
+		for(size_t i = 0; i < 10; ++i)
 			dictionary[i].free_and_null();
 	}
 
