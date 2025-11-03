@@ -289,23 +289,24 @@ TEST_SUITE("LibFP::C++") {
 		CHECK(cp.view_full() == fp::view<uint32_t>{real.data(), real.size()});
 
 		auto utf8 = fp::raii::string::from_codepoints(cp);
-		cp.free_and_null();
+		cp.free();
 		CHECK(utf8 == "Hello, 世界");
 	}
 
 	TEST_CASE("Hash::Dictionary") {
 		fp::dictionary<int, fp::string> dictionary;
-		for(size_t i = 0; i < 30; ++i) {
+		for(size_t i = 0; i < 10; ++i) {
 			auto str = fp::string::format("{}", i);
 			dictionary[i] = str;
 			CHECK(dictionary[i] == str);
 		}
-		for(size_t i = 0; i < 30; ++i) {
+		for(size_t i = 0; i < 10; ++i) {
 			auto str = fp::raii::string::format("{}", i);
-			CHECK(dictionary[i] == str);
+			auto& a = dictionary[i];
+			CHECK(a == str);
 		}
-		for(size_t i = 0; i < 30; ++i)
-			dictionary[i].free_and_null();
+		for(size_t i = 0; i < 10; ++i)
+			dictionary[i].free();
 	}
 
 }

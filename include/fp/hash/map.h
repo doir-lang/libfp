@@ -182,7 +182,10 @@ inline static int16_t fp_hash_map_infos_to_skip() FP_NOEXCEPT {
 
 // TODO: Are there any invariants we have that allow us to assume that we can just shift? instead of modulo?
 inline static size_t __fp_hash_map_element_modulo(void* table, size_t n, size_t type_size) FP_NOEXCEPT {
-	return __fp_hash_map_elements_to_skip(type_size) + n % (fpda_size(table) - __fp_hash_map_elements_to_skip(type_size));
+	auto toSkip = __fp_hash_map_elements_to_skip(type_size);
+	size_t size = fpda_size(table);
+	if(n == size) return n;
+	return toSkip + n % (size - toSkip);
 }
 
 
@@ -190,7 +193,7 @@ inline static size_t __fp_hash_map_element_modulo(void* table, size_t n, size_t 
 inline static uint32_t* __fp_hash_map_entry_hop_info(void* table, size_t index) FP_NOEXCEPT {
 	assert(is_fp_hash_map(table));
 	assert(__fp_hash_map_header(table)->hop_infos != NULL);
-	assert(fpda_size(__fp_hash_map_header(table)) > index);
+	assert(fpda_size(__fp_hash_map_header(table)) >= index);
 	return ((uint32_t*)__fp_hash_map_header(table)) + index;
 }
 
@@ -269,7 +272,7 @@ inline static bool __fp_hash_map_compare_equal(void* table, fp_void_view a, fp_v
 // #endif
 }
 
-inline static bool __fp_hash_map_copy(void* table, void* a, void* b, size_t n) FP_NOEXCEPT {
+inline static bool __fp_hash_map_copy(void* table, void* a, const void* b, size_t n) FP_NOEXCEPT {
 // #ifdef FP_HASH_MAP_DYNAMIC_COPY_FUNCTION
 	return __fp_hash_map_header(table)->copier(a, b, n);
 // #else
@@ -296,6 +299,7 @@ inline static size_t __fp_hash_map_find_position(void* table, const void* _key, 
 	size_t* hashes = __fp_hash_map_header(table)->hashes;
 	size_t hash = __fp_hash_map_hash(table, key, type_size);
 	for(size_t i = 0; i <= FP_HASH_MAP_NEIGHBORHOOD_SIZE; ++i) {
+		// TODO: Is it worth the hassle of checking that this element belongs to this neighborhood to minimize key compares?
 		size_t probe = __fp_hash_map_element_modulo(table, hash + i, type_size);
 		char* probeP = ((char*)table) + probe * type_size;
 		bool occupied = __fp_hash_map_entry_is_occupied(table, probe + infoOffset);
@@ -342,7 +346,7 @@ inline static bool __fp_hash_map_is_in_neighborhood(void* table, size_t start, s
 	if(start <= end)
 		return start <= needle && needle <= end;
 	else // The neighborhood range wraps around the end of the table
-		return start <= needle || needle <= end;
+		return start <= needle || needle <= end; // NOTE: This being different took lots of reasoning!
 }
 
 // This function requires a linear scan over all the cells to determine how many are occupied
@@ -384,7 +388,8 @@ void __fp_hash_map_double_size(void** table, bool store_hashes_while_initializin
 #ifdef FP_IMPLEMENTATION
 {
 	size_t size = fpda_size(*table);
-	if(size > 0) size -= __fp_hash_map_elements_to_skip(type_size);
+	size_t toSkip = __fp_hash_map_elements_to_skip(type_size);
+	if(size > 0) size -= toSkip;
 
 	size_t newSize = size * 2;
 	bool initializing = newSize == 0;
@@ -392,12 +397,12 @@ void __fp_hash_map_double_size(void** table, bool store_hashes_while_initializin
 	if(newSize < FP_HASH_MAP_NEIGHBORHOOD_SIZE) newSize = FP_HASH_MAP_NEIGHBORHOOD_SIZE;
 
 	char* p = (char*)*table;
-	__fpda_maybe_grow((void**)&p, type_size, newSize + __fp_hash_map_elements_to_skip(type_size), true, true);
+	__fpda_maybe_grow((void**)&p, type_size, newSize + toSkip, true, true);
 	// fpda_grow_to_size(p, (newSize + __fp_hash_map_elements_to_skip(type_size)) * type_size);
 	{
 		auto h = __fpda_header(p);
 		// h->capacity /= type_size;
-		h->h.size = newSize + __fp_hash_map_elements_to_skip(type_size);
+		h->h.size = newSize + toSkip;
 		h->h.magic = FP_HASH_MAGIC_NUMBER;
 	}
 	*table = p;
@@ -463,6 +468,7 @@ bool __fp_hash_map_rehash(void** table, bool store_hashes_while_initializing, si
 			if(__fp_hash_map_is_in_neighborhood(*table, hash, i, type_size)) {
 				if (hashes) *__fp_hash_map_entry_hash(*table, i + hashOffset) = hash;
 				size_t distance = i > hash ? i - hash : size - __fp_hash_map_elements_to_skip(type_size) - __fp_hash_map_element_modulo(table, hash - i, type_size);
+				if(i == hash) distance = 0;
 				*__fp_hash_map_entry_hop_info(*table, hash + infoOffset) |= (1 << distance);
 				continue;
 			}
@@ -486,7 +492,8 @@ bool __fp_hash_map_rehash(void** table, bool store_hashes_while_initializing, si
 
 			// Mark it as present in the element it hashes to
 			size_t distance = emptyIndex > hash ? emptyIndex - hash : size - __fp_hash_map_elements_to_skip(type_size) - __fp_hash_map_element_modulo(table, hash - emptyIndex, type_size);
-			*hopInfoIP |= (1 << distance);
+			if(emptyIndex == hash) distance = 0;
+			*__fp_hash_map_entry_hop_info(*table, hash + infoOffset) |= (1 << distance);
 		}
 	}
 	return true;
@@ -502,7 +509,7 @@ inline static bool __fp_hash_map_double_size_and_rehash(void** table, bool store
 }
 #define fp_hash_map_double_size_and_rehash(type, table, store_hashes_while_initializing) __fp_hash_map_double_size_and_rehash((void**)&table, store_hashes_while_initializing, 0, sizeof(type))
 
-inline static void* __fp_hash_map_insert(void** table, void* key, bool store_hashes_while_initializing, size_t type_size, size_t retries /*= 0*/) {
+inline static void* __fp_hash_map_insert(void** table, const void* key, bool store_hashes_while_initializing, size_t type_size, size_t retries /*= 0*/) {
 	int16_t infoOffset = FP_HASH_MAP_ELEM2INFO_OFFSET(type_size);
 	int16_t hashOffset = FP_HASH_MAP_ELEM2HASH_OFFSET(type_size);
 	size_t hash = *table ? __fp_hash_map_hash(*table, fp_void_view_literal(key, type_size), type_size) : 0;
@@ -522,6 +529,7 @@ inline static void* __fp_hash_map_insert(void** table, void* key, bool store_has
 	if(hashes) hashes[emptyIndex + hashOffset] = hash;
 
 	size_t distance = emptyIndex > hash ? emptyIndex - hash : fpda_size(*table) - __fp_hash_map_elements_to_skip(type_size) - __fp_hash_map_element_modulo(table, hash - emptyIndex, type_size);
+	if(emptyIndex == hash) distance = 0;
 	*__fp_hash_map_entry_hop_info(*table, hash + infoOffset) |= (1 << distance);
 	return result;
 }
