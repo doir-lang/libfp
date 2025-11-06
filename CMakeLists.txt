@@ -1,7 +1,11 @@
 cmake_minimum_required(VERSION 3.21)
 project(libfp LANGUAGES C CXX)
 
+include(CMakeDependentOption)
+
 option(FP_ENABLE_TESTS "Weather or not Unit Tests should be built." ${PROJECT_IS_TOP_LEVEL})
+cmake_dependent_option(FP_ENABLE_BENCHMARKING "Weather benchmarking should be enabled for the tests." ${PROJECT_IS_TOP_LEVEL} FP_ENABLE_TESTS OFF)
+cmake_dependent_option(FP_ENABLE_PROFILING "Weather profiling should be enabled for the tests." ${PROJECT_IS_TOP_LEVEL} FP_ENABLE_TESTS OFF)
 option(FP_FETCH_EXTERNAL_CPPSTL "Weather or not a minimal version of the C++ Standard Template Library should be fetched (Useful for embedded targets)" OFF)
 
 # set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=address -Wall")
