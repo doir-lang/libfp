@@ -3,6 +3,7 @@ project(libfp LANGUAGES C CXX)
 
 include(CMakeDependentOption)
 
+option(FP_ENABLE_DOCS "Weather or not the documentation should be built." OFF)
 option(FP_ENABLE_TESTS "Weather or not Unit Tests should be built." ${PROJECT_IS_TOP_LEVEL})
 cmake_dependent_option(FP_ENABLE_BENCHMARKING "Weather benchmarking should be enabled for the tests." ${PROJECT_IS_TOP_LEVEL} FP_ENABLE_TESTS OFF)
 cmake_dependent_option(FP_ENABLE_PROFILING "Weather profiling should be enabled for the tests." ${PROJECT_IS_TOP_LEVEL} FP_ENABLE_TESTS OFF)
@@ -94,4 +95,21 @@ if(${FP_ENABLE_TESTS})
 			add_subdirectory(${fetch_tracy_SOURCE_DIR}/profiler/)
 		endif()
 	endif()
+endif()
+
+if(FP_ENABLE_DOCS)
+	find_package(Doxygen)
+	set(Sphinx_DIR "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+	find_package(Sphinx REQUIRED breathe)
+
+	set(DOXYGEN_GENERATE_HTML NO)
+	set(DOXYGEN_GENERATE_XML YES)
+	configure_file(Doxyfile Doxyfile.fp_doxygen)
+	doxygen_add_docs(fp_doxygen CONFIG_FILE ${CMAKE_CURRENT_BINARY_DIR}/Doxyfile.fp_doxygen)
+
+	sphinx_add_docs(
+		fp_sphinx
+		BREATHE_PROJECTS fp_doxygen
+		BUILDER html
+		SOURCE_DIRECTORY docs)
 endif()
