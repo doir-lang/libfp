@@ -209,16 +209,17 @@ inline static struct __FatDynamicArrayHeader* __fpda_header(const void* da) FP_N
 /**
  * @brief Internal allocation function for dynamic arrays
  * @param _size Size in bytes to allocate
+ * @param extra_header_size Extra header size to allocate, allows hash tables to use the same function!
  * @return Pointer to allocated data
  * @internal
  */
-void* __fpda_malloc(size_t _size) FP_NOEXCEPT
+void* __fpda_malloc(size_t _size, size_t extra_header_size) FP_NOEXCEPT
 #ifdef FP_IMPLEMENTATION
 {
 	assert(_size > 0);
-	size_t size = FPDA_HEADER_SIZE + _size + 1;
+	size_t size = FPDA_HEADER_SIZE + extra_header_size + _size + 1;
 	uint8_t* p = (uint8_t*)__fp_alloc(NULL, size);
-	p += FPDA_HEADER_SIZE;
+	p += FPDA_HEADER_SIZE + extra_header_size;
 	if(!p) return 0;
 	auto h = __fpda_header(p);
 	h->capacity = _size;
@@ -246,7 +247,7 @@ void* __fpda_malloc(size_t _size) FP_NOEXCEPT
  * fpda_free_and_null(arr);
  * @endcode
  */
-#define fpda_malloc(type, _size) ((type*)((uint8_t*)(*__fpda_header(__fpda_malloc(NULL, sizeof(type) * (_size))) = (struct __FatDynamicArrayHeader){\
+#define fpda_malloc(type, _size) ((type*)((uint8_t*)(*__fpda_header(__fpda_malloc(NULL, sizeof(type) * (_size), 0)) = (struct __FatDynamicArrayHeader){\
 	.capacity = 0,\
 	.h = {\
 		.magic = FP_DYNARRAY_MAGIC_NUMBER,\
@@ -409,39 +410,63 @@ inline static size_t fpda_capacity(const void* da) FP_NOEXCEPT {
 	return __fpda_header(da)->capacity;
 }
 
-/**
- * @brief Internal function to grow dynamic array if needed
- * @internal
- */
+#define __FP_MAYBE_GROW_IMPL(da, type_size, new_size, update_utilized, exact_sizing,\
+							malloc_fn, free_fn, header_fn, is_valid_fn,\
+							GET_CAPACITY, SET_CAPACITY, GET_SIZE, SET_SIZE,\
+							GET_DATA, COPY_EXTRA)\
+do {\
+	if(*(da) == NULL) {\
+		size_t initial_size = (exact_sizing) ? (new_size) : FPDA_DEFAULT_SIZE_BYTES / (type_size);\
+		if(initial_size == 0) initial_size++;\
+		*(da) = malloc_fn(initial_size * (type_size));\
+		auto _h_init = header_fn(*(da));\
+		SET_CAPACITY(_h_init, GET_CAPACITY(_h_init) / (type_size));\
+		SET_SIZE(_h_init, 0);\
+	}\
+\
+	assert(is_valid_fn(*(da)));\
+\
+	auto _h = header_fn(*(da));\
+	if(GET_CAPACITY(_h) >= (new_size)) {\
+		if(update_utilized) {\
+			size_t _cur = GET_SIZE(_h);\
+			SET_SIZE(_h, _cur > (new_size) ? _cur : (new_size));\
+		}\
+		return GET_DATA(_h) + ((type_size) * ((new_size) - 1));\
+	}\
+\
+	size_t _size2 = (exact_sizing) ? (new_size) : fp_upper_power_of_two(new_size);\
+	void* _new = malloc_fn((type_size) * _size2);\
+	auto _newH = header_fn(_new);\
+	if(update_utilized) {\
+		size_t _cur = GET_SIZE(_h);\
+		SET_SIZE(_newH, _cur > (new_size) ? _cur : (new_size));\
+	}\
+	SET_CAPACITY(_newH, _size2);\
+	COPY_EXTRA(_newH, _h);\
+	memcpy(GET_DATA(_newH), GET_DATA(_h), (type_size) * GET_SIZE(_h));\
+\
+	free_fn(*(da));\
+	*(da) = _new;\
+	return GET_DATA(_newH) + ((type_size) * ((new_size) - 1));\
+} while(0)
+
+// Accessor macros for fpda
+#define __FPDA_GET_CAPACITY(H) ((H)->capacity)
+#define __FPDA_SET_CAPACITY(H, v) ((H)->capacity = (v))
+#define __FPDA_GET_SIZE(H) ((H)->h.size)
+#define __FPDA_SET_SIZE(H, v) ((H)->h.size = (v))
+#define __FPDA_GET_DATA(H) ((H)->h.data)
+#define __FPDA_COPY_EXTRA(newH, oldH) ((void)0)
+
 inline static void* __fpda_maybe_grow(void** da, size_t type_size, size_t new_size, bool update_utilized, bool exact_sizing) FP_NOEXCEPT {
-	if(*da == NULL) {
-		size_t initial_size = exact_sizing ? new_size : FPDA_DEFAULT_SIZE_BYTES / type_size;
-		if(initial_size == 0) initial_size++;
-		*da = __fpda_malloc(initial_size * type_size);
-		auto h = __fpda_header(*da);
-		h->capacity /= type_size;
-		h->h.size = 0;
-	}
-
-	assert(is_fpda(*da));
-
-	auto h = __fpda_header(*da);
-	if(h->capacity >= new_size) {
-		if(update_utilized) h->h.size = h->h.size > new_size ? h->h.size : new_size;
-		return h->h.data + (type_size * (new_size - 1));
-	}
-
-	size_t size2 = exact_sizing ? new_size : fp_upper_power_of_two(new_size);
-	void* new_ = __fpda_malloc(type_size * size2);
-	auto newH = __fpda_header(new_);
-	if(update_utilized)
-		newH->h.size = h->h.size > new_size ? h->h.size : new_size;
-	newH->capacity = size2;
-	memcpy(newH->h.data, h->h.data, type_size * h->h.size);
-
-	fpda_free(*da);
-	*da = new_;
-	return newH->h.data + (type_size * (new_size - 1));
+#define __fpda_malloc_impl(size) __fpda_malloc(size, 0)
+	__FP_MAYBE_GROW_IMPL(da, type_size, new_size, update_utilized, exact_sizing,
+						__fpda_malloc_impl, fpda_free, __fpda_header, is_fpda,
+						__FPDA_GET_CAPACITY, __FPDA_SET_CAPACITY,
+						__FPDA_GET_SIZE, __FPDA_SET_SIZE,
+						__FPDA_GET_DATA, __FPDA_COPY_EXTRA);
+#undef __fpda_malloc_impl
 }
 
 /// @cond INTERNAL
