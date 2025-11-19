@@ -6,6 +6,7 @@
 #include <fp/pointer.hpp>
 #include <fp/dynarray.hpp>
 #include <fp/string.hpp>
+#include <fp/hash.hpp>
 
 TEST_SUITE("LibFP::C++") {
 
@@ -227,4 +228,46 @@ TEST_SUITE("LibFP::C++") {
 		CHECK(utf8 == "Hello, 世界");
 	}
 
+	TEST_CASE("Hashtable") {
+		fp::auto_free table = fp::hash_table<int>::create();
+		CHECK(table.raw != nullptr);
+		CHECK(table.is_hash_table());
+
+		CHECK(table.insert(5, true) == 5);
+
+		auto p = table.find_position(5);
+		CHECK(p == 6);
+		CHECK(table[p] == 5);
+		auto v = table.find(5);
+		CHECK(*v == 5);
+
+		auto v2 = &table.insert(5);
+		CHECK(v2 == v);
+
+		v = &table.insert(6);
+		CHECK(v != v2);
+		CHECK(*v == 6);
+
+		auto failed_index = table.double_size_and_rehash();
+		REQUIRE(failed_index == fp_not_found);
+
+		CHECK(*table.find(5) == 5);
+		CHECK(*table.find(6) == 6);
+		CHECK(table.find(7) == nullptr);
+
+		table.remove(5);
+
+		CHECK(table.find(5) == nullptr);
+	}
+
+	TEST_CASE("Hashmap") {
+		fp::hash_map<fp::raii::string, int> map;
+		for(size_t i = 0; i < 100; ++i)
+			map[fp::raii::string::format("{}", i)] = i;
+
+		for(size_t i = 0; i < 100; ++i) {
+			fp::auto_free s = fp::string::format("{}", i);
+			CHECK(map[s] == i);
+		}
+	}
 }
