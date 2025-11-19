@@ -246,10 +246,11 @@ extern "C" {
  * @note These were chosen explicitly to be invalid unicode code points.
  */
 enum FP_MagicNumbers {
-	FP_MAGIC_NUMBER = 0xFE00,           ///< Base magic number (high byte mask)
-	FP_HEAP_MAGIC_NUMBER = 0xFEFE,      ///< Heap-allocated fat pointer
-	FP_STACK_MAGIC_NUMBER = 0xFEFF,     ///< Stack-allocated fat pointer
-	FP_DYNARRAY_MAGIC_NUMBER = 0xFEFD,  ///< Dynamic array fat pointer
+	FP_MAGIC_NUMBER = 0xFE00,             ///< Base magic number (high byte mask)
+	FP_HEAP_MAGIC_NUMBER = 0xFEFE,        ///< Heap-allocated fat pointer
+	FP_STACK_MAGIC_NUMBER = 0xFEFF,       ///< Stack-allocated fat pointer
+	FP_DYNARRAY_MAGIC_NUMBER = 0xFEFD,    ///< Dynamic array fat pointer
+	FP_HASH_TABLE_MAGIC_NUMBER = 0xFEFC,  ///< Hashtable fat pointer
 };
 
 /// @cond INTERNAL
