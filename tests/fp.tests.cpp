@@ -9,6 +9,7 @@
 #include <fp/pointer.h>
 #include <fp/dynarray.h>
 #include <fp/string.h>
+#include <fp/hash.h>
 
 extern "C" {
 void check_stack();
@@ -17,6 +18,7 @@ void check_view();
 void check_dynarray();
 void check_string();
 void check_utf32();
+void check_hashtable();
 }
 
 #define DISCARD_RESULT (void)
@@ -388,6 +390,77 @@ TEST_SUITE("LibFP") {
 		fp_string_free(utf8);
 	}
 
+	TEST_CASE("Hashtable") {
+		fp_hashtable(int) table = fp_create_default_hash_table(int);
+		CHECK(table != nullptr);
+		CHECK(is_fpht(table));
+
+		int key = 5;
+		auto v = fpht_insert_assume_unique(table, key);
+		CHECK(*v == key);
+
+		auto p = fpht_find_position(table, key);
+		CHECK(p == 6);
+		CHECK(table[p] == key);
+		v = fpht_find(table, key);
+		CHECK(*v == key);
+
+		auto v2 = fpht_insert(table, key);
+		CHECK(v2 == v);
+
+		key = 6;
+		v = fpht_insert(table, key);
+		CHECK(v != v2);
+		CHECK(*v == 6);
+
+		auto failed_index = fpht_double_size_and_rehash(table);
+		REQUIRE(failed_index == fp_not_found);
+
+		key = 5;
+		v = fpht_find(table, key);
+		CHECK(*v == 5);
+		key = 6;
+		v = fpht_find(table, key);
+		CHECK(*v == 6);
+		key = 7;
+		v = fpht_find(table, key);
+		CHECK(v == nullptr);
+
+		key = 5;
+		fpht_remove(table, key);
+
+		v = fpht_find(table, key);
+		CHECK(v == nullptr);
+
+		fpht_free_and_null(table);
+	}
+
+	TEST_CASE("Hashtable from view") {
+		float* values = fp_alloca(float, 5);
+		for(size_t i = 0; i < fp_size(values); ++i)
+			values[i] = i;
+
+		auto table = fp_create_default_hash_table_from_array(values);
+		float key = 3;
+		auto v = fpht_find(table, key);
+		CHECK(*v == key);
+		key = 20;
+		v = fpht_find(table, key);
+		CHECK(v == nullptr);
+		fpht_free_and_null(table);
+
+		for(size_t i = 0; i < fp_size(values); ++i)
+			values[i] = 3;
+		table = fp_create_default_hash_table_from_array(values);
+		key = 3;
+		v = fpht_find(table, key);
+		CHECK(*v == key);
+		key = 20;
+		v = fpht_find(table, key);
+		CHECK(v == nullptr);
+		fpht_free_and_null(table);
+	}
+
 #if !(defined _MSC_VER || defined __APPLE__)
 	TEST_CASE("C") {
 		check_stack();
@@ -396,6 +469,7 @@ TEST_SUITE("LibFP") {
 		check_dynarray();
 		check_string();
 		check_utf32();
+		check_hashtable();
 	}
 #endif
 }

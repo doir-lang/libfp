@@ -1,5 +1,6 @@
 #pragma once
 
+#include "fp/pointer.hpp"
 #include "string.hpp"
 #include "fnv1a.h"
 #include <cstdint>
@@ -15,6 +16,20 @@ namespace fp { inline namespace hash {
 	struct fnv1a : public fnv1a_base {
 		size_t operator()(const T& v) const noexcept {
 			return hash({(std::byte*)&v, sizeof(T)});
+		}
+	};
+
+	template<typename T>
+	struct fnv1a<fp::view<T>> : public fnv1a_base {
+		size_t operator()(const fp::view<T> view) const noexcept {
+			return hash(view.byte_view());
+		}
+	};
+
+	template<typename T>
+	struct fnv1a<fp::pointer<T>> : public fnv1a_base {
+		size_t operator()(const fp::pointer<T> p) const noexcept {
+			return hash(p.full_view().byte_view());
 		}
 	};
 

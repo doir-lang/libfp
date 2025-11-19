@@ -2,6 +2,7 @@
 #include <fp/pointer.h>
 #include <fp/dynarray.h>
 #include <fp/string.h>
+#include <fp/hash.h>
 
 // void* __heap_end;
 
@@ -172,4 +173,49 @@ void check_utf32(void) {
 	fpda_free(cp);
 	assert(fp_string_equal(utf8, "Hello, 世界"));
 	fp_string_free(utf8);
+}
+
+void check_hashtable(void) {
+	fp_hashtable(int) table = fp_create_default_hash_table(int);
+	assert(table != nullptr);
+	assert(is_fpht(table));
+
+	int key = 5;
+	auto v = fpht_insert_assume_unique(table, key);
+	assert(*v == key);
+
+	auto p = fpht_find_position(table, key);
+	assert(p == 6);
+	assert(table[p] == key);
+	v = fpht_find(table, key);
+	assert(*v == key);
+
+	auto v2 = fpht_insert(table, key);
+	assert(v2 == v);
+
+	key = 6;
+	v = fpht_insert(table, key);
+	assert(v != v2);
+	assert(*v == 6);
+
+	auto failed_index = fpht_double_size_and_rehash(table);
+	assert(failed_index == fp_not_found);
+
+	key = 5;
+	v = fpht_find(table, key);
+	assert(*v == 5);
+	key = 6;
+	v = fpht_find(table, key);
+	assert(*v == 6);
+	key = 7;
+	v = fpht_find(table, key);
+	assert(v == nullptr);
+
+	key = 5;
+	fpht_remove(table, key);
+
+	v = fpht_find(table, key);
+	assert(v == nullptr);
+
+	fpht_free_and_null(table);
 }
