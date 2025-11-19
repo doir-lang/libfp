@@ -9,6 +9,7 @@
 #include <fp/pointer.h>
 #include <fp/dynarray.h>
 #include <fp/string.h>
+#include <fp/hash.h>
 
 extern "C" {
 void check_stack();
@@ -17,6 +18,7 @@ void check_view();
 void check_dynarray();
 void check_string();
 void check_utf32();
+void check_hashtable();
 }
 
 #define DISCARD_RESULT (void)
@@ -384,6 +386,51 @@ TEST_SUITE("LibFP") {
 		fp_string_free(utf8);
 	}
 
+	TEST_CASE("Hashtable") {
+		fp_hashtable(int) table = fp_create_default_hash_table(int);
+		CHECK(table != nullptr);
+		CHECK(is_fp_hash_table(table));
+
+		int key = 5;
+		auto v = fp_hash_table_insert_assume_unique(table, key);
+		CHECK(*v == key);
+
+		auto p = fp_hash_table_find_position(table, key);
+		CHECK(p == 6);
+		CHECK(table[p] == key);
+		v = fp_hash_table_find(table, key);
+		CHECK(*v == key);
+
+		auto v2 = fp_hash_table_insert(table, key);
+		CHECK(v2 == v);
+
+		key = 6;
+		v = fp_hash_table_insert(table, key);
+		CHECK(v != v2);
+		CHECK(*v == 6);
+
+		auto failed_index = fp_hash_table_double_size_and_rehash(table);
+		REQUIRE(failed_index == FP_NOT_FOUND);
+
+		key = 5;
+		v = fp_hash_table_find(table, key);
+		CHECK(*v == 5);
+		key = 6;
+		v = fp_hash_table_find(table, key);
+		CHECK(*v == 6);
+		key = 7;
+		v = fp_hash_table_find(table, key);
+		CHECK(v == nullptr);
+
+		key = 5;
+		fp_hash_table_remove(table, key);
+
+		v = fp_hash_table_find(table, key);
+		CHECK(v == nullptr);
+
+		fp_hash_table_free_and_null(table);
+	}
+
 #if !(defined _MSC_VER || defined __APPLE__)
 	TEST_CASE("C") {
 		check_stack();
@@ -392,6 +439,7 @@ TEST_SUITE("LibFP") {
 		check_dynarray();
 		check_string();
 		check_utf32();
+		check_hashtable();
 	}
 #endif
 }
