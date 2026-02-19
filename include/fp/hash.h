@@ -319,6 +319,7 @@ inline static size_t __fpht_rehash(void** table, size_t type_size, size_t failur
 		__fpht_copy(*table, scratch, tableP + i * type_size, type_size);
 		if(!__fpht_insert(table, fp_void_view_literal(scratch, type_size), failures))
 			return i;
+		tableP = (uint8_t*)*table;  // re-read in case of realloc
 	}
 	return fp_not_found;
 }
