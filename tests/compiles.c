@@ -3,6 +3,7 @@
 #include <fp/dynarray.h>
 #include <fp/string.h>
 #include <fp/hash.h>
+#include <fp/bitmask.h>
 
 // void* __heap_end;
 
