@@ -2073,7 +2073,7 @@ namespace fp {
 		 * @endcode
 		 */
 		constexpr array(std::initializer_list<T> init): __header(__default_header) {
-			static_assert(init.size() == __header.size, "Incorrect number of default initializers provided!");
+			assert(init.size() == __header.size && "Incorrect number of default initializers provided!");
 			size_t i = 0;
 			for(auto& ini: init)
 				raw[i++] = std::move(ini);
