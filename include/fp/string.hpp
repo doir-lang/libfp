@@ -302,6 +302,8 @@ namespace fp {
 		~auto_free() { if(string::raw) string::free(true); }
 
 		using string::string;
+
+		
 	};
 
 	inline fp::auto_free<string> string::auto_free() { return std::move(*this); }
@@ -373,6 +375,7 @@ namespace fp {
 #ifdef FP_FORMAT_SUPPORT
 	namespace builder {
 		struct string: public fp::raii::string {
+			string() {}
 			FP_HPP_DEFAULT_CONSTRUCTOR_BLOCK(string, fp::raii::string);
 
 			template<typename T>
@@ -394,6 +397,11 @@ namespace fp {
 			}
 
 			inline string& operator<<(const fp::string& str) {
+				concatenate_inplace(str);
+				return *this;
+			}
+
+			inline string& operator<<(const fp::builder::string& str) {
 				concatenate_inplace(str);
 				return *this;
 			}
