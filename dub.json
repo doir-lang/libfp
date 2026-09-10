@@ -1,0 +1,24 @@
+{
+    "name": "libfp",
+    "description": "Fat pointer / dynarray / string / hash table library for -betterC D",
+    "targetType": "staticLibrary",
+    "sourcePaths": ["source"],
+    "importPaths": ["source"],
+    "dflags-ldc": ["-betterC", "-checkaction=C"],
+    "dflags-dmd": ["-betterC", "-checkaction=C"],
+    "configurations": [
+        {
+            "name": "library",
+            "targetType": "staticLibrary"
+        },
+        {
+            "name": "unittest",
+            "targetType": "executable",
+            "mainSourceFile": "tests/runner.d",
+            "sourcePaths": ["source", "tests"],
+            "importPaths": ["source", "tests"],
+            "dflags-ldc": ["-betterC", "-checkaction=C"],
+            "dflags-dmd": ["-betterC", "-checkaction=C"]
+        }
+    ]
+}

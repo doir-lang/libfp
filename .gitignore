@@ -1,0 +1,9 @@
+.vscode
+.vs
+.cache
+.dub
+libfp
+libfp.exe
+*.obj
+*.o
+*.a
