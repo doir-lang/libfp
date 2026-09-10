@@ -3,18 +3,18 @@ module fp.pointer;
 import core.stdc.stdlib : cRealloc = realloc, cFree = free, cAlloca = alloca;
 
 /**
- * Signature of the function used to allocate/reallocate/free the raw memory
- * backing a fat pointer. Semantics mirror `realloc`:
- *
- * $(UL
- *   $(LI `p is null && size > 0`: allocate new memory.)
- *   $(LI `p !is null && size > 0`: reallocate, preserving existing data.)
- *   $(LI `size == 0`: free `p` (if non-null) and return `null`.)
- * )
- *
- * Override `fpAllocFunction` to plug in a custom allocator.
- */
-alias AllocFn = void* function(void* p, size_t size) @nogc nothrow;
+* Signature of the function used to allocate/reallocate/free the raw memory
+* backing a fat pointer. Semantics mirror `realloc`:
+*
+* $(UL
+*   $(LI `p is null && size > 0`: allocate new memory.)
+*   $(LI `p !is null && size > 0`: reallocate, preserving existing data.)
+*   $(LI `size == 0`: free `p` (if non-null) and return `null`.)
+* )
+*
+* Override `fpAllocFunction` to plug in a custom allocator.
+*/
+alias AllocFunction = void* function(void* p, size_t size) @nogc nothrow;
 
 private void* defaultAllocFunction(void* p, size_t size) @nogc nothrow {
 	if (size == 0) {
@@ -25,7 +25,7 @@ private void* defaultAllocFunction(void* p, size_t size) @nogc nothrow {
 }
 
 /// The allocator currently used by the library. Reassign to customize.
-AllocFn allocFunction = &defaultAllocFunction;
+AllocFunction allocFunction = &defaultAllocFunction;
 
 
 @nogc nothrow: // every declaration below is @nogc nothrow unless stated otherwise
@@ -101,8 +101,16 @@ void free(T)(ref T* p) {
 bool valid(inout void* p) @trusted {
 	if (p is null) return false;
 	inout(Header)* h = headerOf(p);
+	if ((cast(ushort) h.type & validityMask) != validityTag) return false;
+	if (h.size > 0) return true;
+
+	// Only dynarray/hashTable allocations nest `pointer.Header` inside a
+	// larger struct that has a `capacity` field immediately before it; a
+	// plain heap/stack allocation has nothing there, so reading it would
+	// walk off the front of the allocation.
+	if (h.type != PointerType.dynarray && h.type != PointerType.hashTable) return false;
 	size_t capacity = *cast(const(size_t)*)(cast(const(ubyte)*) h - size_t.sizeof);
-	return (cast(ushort) h.type & validityMask) == validityTag && (h.size > 0 || capacity > 0);
+	return capacity > 0;
 }
 
 PointerType pointerType(inout void* p) {
@@ -131,16 +139,16 @@ bool empty(inout void* p) {
 	return length(p) == 0;
 }
 
-inout(T)* front(T)(inout(T)* p) {
+inout(T)* front(T)(inout T* p) {
 	return p;
 }
 
-inout(T)* back(T)(inout(T)* p) @trusted {
+inout(T)* back(T)(inout T* p) @trusted {
 	immutable n = length(p);
 	return p + (n > 0 ? n - 1 : 0);
 }
 
-inout(T)[] slice(T)(inout(T)* p) {
+inout(T)[] slice(T)(inout T* p) {
 	return p[0 .. length(p)];
 }
 
@@ -248,7 +256,17 @@ unittest {
 	assert(!stackAllocated(arr));
 	assert(heapAllocated(arr));
 	assert(length(arr) == 25);
-	assert(arr[20] == 6);	
+	assert(arr[20] == 6);
+	assert(!empty(arr));
+}
+
+unittest {
+	// The `const T*` overload of `free` (as opposed to the `ref T*` one):
+	// a `const(int)*` *lvalue* would still bind to `ref T*` with `T`
+	// deduced as `const(int)`, so this needs a genuine rvalue (an
+	// unaddressable cast expression) to force the by-value overload.
+	int* arr = malloc!int(4);
+	free(cast(const int*) arr);
 }
 
 unittest {

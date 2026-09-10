@@ -41,7 +41,7 @@ void free(ref char* str) @trusted {
 	}
 }
 
-private char* makeDynamicSlice(inout(char)[] view) @trusted {
+char* makeDynamicSlice(inout(char)[] view) @trusted {
 	if (view.length == 0) return null;
 	char* out_ = null;
 	growToSize(out_, view.length);
@@ -55,7 +55,7 @@ char* makeDynamic(inout char* str) @trusted {
 alias promoteLiteral = makeDynamic;
 alias clone = makeDynamic;
 
-private int compareSlices(inout(char)[] a, inout(char)[] b) @trusted {
+int compareSlices(inout(char)[] a, inout(char)[] b) @trusted {
 	if (a.length != b.length) return cast(int)(a.length - b.length);
 	return cMemcmp(a.ptr, b.ptr, a.length);
 }
@@ -67,7 +67,7 @@ bool equal(inout char* a, inout char* b) @trusted {
 	return compare(a, b) == 0;
 }
 
-private char* concatenateSlice(ref char* a, inout(char)[] b) @trusted {
+char* concatenateSlice(ref char* a, inout(char)[] b) @trusted {
 	assert(valid(a) || a is null);
 	immutable sizeA = length(a);
 	immutable sizeB = b.length;
@@ -172,7 +172,7 @@ char* fromCodepoints(inout uint* codepoints) @trusted {
 
 char* replicate(ref char* str, size_t times) @trusted {
 	if (times == 0) {
-		str = null;
+		free(str);
 		return str;
 	}
 
@@ -289,6 +289,34 @@ extern (C) char* format(inout char* fmt, ...) @trusted {
 }
 
 unittest {
+	// The `inout(char)[]` overload of `slice` (identity passthrough for
+	// inputs that are already slices, as opposed to the `char*` overload
+	// above it).
+	char[5] buf = "hello";
+	assert(slice(buf[]) == "hello");
+}
+
+unittest {
+	// free()'s `const char*` overload (as opposed to the `ref char*` one,
+	// which lvalue arguments prefer): a null argument exercises all three
+	// of its branches (not a dynarray, not valid/heap-allocated, falls
+	// through to the raw-allocator branch) safely, since freeing null is a
+	// no-op at every level.
+	free(null);
+
+	// The `ref char*` overload's heap-allocated (but non-dynarray) branch.
+	import fp.pointer : ptrMalloc = malloc;
+	char* heapStr = ptrMalloc!char(4);
+	free(heapStr);
+
+	// The `ref char*` overload's final fallback branch, which also nulls
+	// the argument out.
+	char* nullStr = null;
+	free(nullStr);
+	assert(nullStr is null);
+}
+
+unittest {
 	char* str = promoteLiteral("Hello World");
 	scope(exit) free(str);
 
@@ -310,6 +338,8 @@ unittest {
 	assert(compare(concat, "Hello World! bob") == 0);
 	assert(contains(concat, "World!", 0));
 	assert(find(concat, "World!", 0) == 6);
+	assert(find(concat, "zzz", 0) == notFound);
+	assert(!contains(concat, "zzz", 0));
 
 	char* appended = makeDynamic(str);
 	scope(exit) free(appended);
@@ -325,6 +355,10 @@ unittest {
 	cast(void)replicate(repl, 5);
 	assert(compare(repl, "Hello WorldHello WorldHello WorldHello WorldHello World") == 0);
 
+	char* zeroRepl = null;
+	cast(void)replicate(zeroRepl, 0);
+	assert(zeroRepl is null);
+
 	char* replaced = makeDynamic(repl);
 	scope(exit) free(replaced);
 	cast(void)replace(replaced, "World", "Bob", 0);
@@ -336,6 +370,23 @@ unittest {
 	assert(startsWith(replaced, "Hello", 0));
 	assert(endsWith(replaced, "World!", 0));
 	assert(!endsWith(replaced, "World", 0));
+	// Equal-length find/replace: the third (in-place, no grow/shrink) branch
+	// of replaceRangeSlice.
+	cast(void)replace(replaced, "World!", "Earth!", 0);
+	assert(compare(replaced, "Hello Earth!Hello Earth!Hello Earth!Hello Earth!Hello Earth!") == 0);
+
+	// The char*-based `replaceRange`/`replaceFirst` wrappers: every prior
+	// call above went through their `*Slices` counterparts directly.
+	char* rr = makeDynamicSlice("Hello World");
+	scope(exit) free(rr);
+	cast(void)replaceRange(rr, "Bob", 6, 5);
+	assert(compare(rr, "Hello Bob") == 0);
+
+	char* rf = makeDynamicSlice("Hello World World");
+	scope(exit) free(rf);
+	size_t firstPos = replaceFirst(rf, "World", "Bob", 0);
+	assert(firstPos == 6);
+	assert(compare(rf, "Hello Bob World") == 0);
 }
 
 unittest {
@@ -351,4 +402,32 @@ unittest {
 	char* utf8 = fromCodepoints(cp);
 	scope(exit) free(utf8);
 	assert(equal(utf8, "Hello, 世界"));
+}
+
+unittest {
+	// 2-byte and 4-byte UTF-8 encode/decode round trips: the test above only
+	// exercises 1-byte (ASCII) and 3-byte (CJK) codepoints.
+	import fp.dynarray : daLength = length;
+
+	uint* cp = codepoints("café \U0001F600");
+	scope(exit) daFree(cp);
+	uint[6] expected = ['c', 'a', 'f', 0xE9, ' ', 0x1F600];
+	assert(daLength(cp) == expected.length);
+	foreach (i, c; expected)
+		assert(cp[i] == c);
+
+	char* utf8 = fromCodepoints(cp);
+	scope(exit) free(utf8);
+	assert(equal(utf8, "café \U0001F600"));
+}
+
+unittest {
+	// encodeUtf8 rejecting an out-of-range codepoint, and fromCodepointsSlice
+	// propagating that failure.
+	uint[1] outOfRange = [0x110000];
+	assert(fromCodepointsSlice(outOfRange[]) is null);
+
+	// codepointsSlice rejecting an invalid UTF-8 lead byte.
+	ubyte[1] invalidByte = [0x80];
+	assert(codepointsSlice(cast(char[]) invalidByte[]) is null);
 }
