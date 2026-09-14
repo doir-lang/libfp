@@ -80,6 +80,28 @@ char* concatenate(ref char* a, inout char* b) @trusted {
 	return concatenateSlice(a, slice(b));
 }
 
+char* concatenateMultipleSlices(Args...)(ref char* str, Args pieces) @trusted {
+	static foreach (p; pieces)
+		cast(void)concatenateSlice(str, p);
+	return str;
+}
+char* concatenateMultiple(Args...)(ref char* str, Args pieces) @trusted {
+	static foreach (p; pieces)
+		cast(void)concatenateSlice(str, slice(p));
+	return str;
+}
+
+/// Concatenates every piece into a newly heap-allocated fp string (empty
+/// pieces are fine). The caller frees the result with `fp.string.free`.
+char* createFromConcatenationSlices(Args...)(Args pieces) @trusted {
+	char* out_ = null;
+	return concatenateMultipleSlices(out_, pieces);
+}
+char* createFromConcatenation(Args...)(Args pieces) @trusted {
+	char* out_ = null;
+	return concatenateMultiple(out_, pieces);
+}
+
 char* append(ref char* str, char c) @trusted {
 	assert(valid(str));
 	immutable size = ptrLength(str);
@@ -203,6 +225,31 @@ size_t find(inout char* haystack, inout char* needle, size_t start) @trusted {
 
 bool contains(inout char* haystack, inout char* needle, size_t start) @trusted {
 	return find(haystack, needle, start) != notFound;
+}
+
+/// Splits `str` on every occurrence of `delimiter`, returning a newly
+/// allocated fp dynarray of non-owning slices into `str`. The slices alias
+/// `str`, so it must outlive them; the caller frees the returned dynarray
+/// itself with `fp.dynarray.free`.
+const(char)[]* splitSlices(const(char)[] str, const(char)[] delimiter) @trusted {
+	assert(delimiter.length > 0);
+	const(char)[]* result = null;
+
+	size_t start = 0;
+	while (true) {
+		immutable pos = findSlices(str, delimiter, start);
+		if (pos == notFound) {
+			pushBack(result, str[start .. $]);
+			break;
+		}
+		pushBack(result, str[start .. pos]);
+		start = pos + delimiter.length;
+	}
+
+	return result;
+}
+const(char)[]* split(inout char* str, inout char* delimiter) @trusted {
+	return splitSlices(slice(str), slice(delimiter));
 }
 
 bool startsWithSlices(inout(char)[] haystack, inout(char)[] needle, size_t start) @trusted {
@@ -430,4 +477,57 @@ unittest {
 	// codepointsSlice rejecting an invalid UTF-8 lead byte.
 	ubyte[1] invalidByte = [0x80];
 	assert(codepointsSlice(cast(char[]) invalidByte[]) is null);
+}
+
+unittest {
+	import fp.dynarray : daLength = length;
+
+	const(char)[]* parts = splitSlices("a,bb,,ccc", ",");
+	scope (exit) daFree(parts);
+
+	assert(daLength(parts) == 4);
+	assert(parts[0] == "a");
+	assert(parts[1] == "bb");
+	assert(parts[2] == "");
+	assert(parts[3] == "ccc");
+}
+
+unittest {
+	// Multi-character delimiter, and the char*-based `split` wrapper.
+	import fp.dynarray : daLength = length;
+
+	char* str = promoteLiteral("a::bb::ccc");
+	scope (exit) free(str);
+	char* delim = promoteLiteral("::");
+	scope (exit) free(delim);
+
+	const(char)[]* parts = split(str, delim);
+	scope (exit) daFree(parts);
+
+	assert(daLength(parts) == 3);
+	assert(parts[0] == "a");
+	assert(parts[1] == "bb");
+	assert(parts[2] == "ccc");
+}
+
+unittest {
+	import fp.dynarray : daLength = length;
+
+	const(char)[]* parts = splitSlices("no-delimiter-here", ",");
+	scope (exit) daFree(parts);
+
+	assert(daLength(parts) == 1);
+	assert(parts[0] == "no-delimiter-here");
+}
+
+unittest {
+	char* result = createFromConcatenationSlices("Hello, ", "World", "!");
+	scope (exit) free(result);
+	assert(equal(result, "Hello, World!"));
+
+	char* world = promoteLiteral("World");
+	scope (exit) free(world);
+	char* mixed = createFromConcatenation("Hello, ".ptr, world, "!".ptr);
+	scope (exit) free(mixed);
+	assert(equal(mixed, "Hello, World!"));
 }
