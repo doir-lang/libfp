@@ -7,3 +7,5 @@ libfp.exe
 *.obj
 *.o
 *.a
+bin
+*.lst

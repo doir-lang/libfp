@@ -420,6 +420,28 @@ unittest {
 	assert(finalizeCallCount == 3);
 }
 
+unittest {
+	// removeAtPosition: remove() finalizes exactly the entry it retires, and
+	// finalizes nothing at all when the key isn't in the table.
+	Config cfg;
+	cfg.finalizeFunction = &countingFinalize;
+	int* table = create!int(cfg);
+	scope(exit) free(table);
+
+	foreach (i; 0 .. 3)
+		cast(void) insert(table, i);
+
+	finalizeCallCount = 0;
+	assert(contains(table, 1));
+	remove(table, 1);
+	assert(finalizeCallCount == 1);
+	assert(!contains(table, 1));
+
+	remove(table, 99);
+	assert(finalizeCallCount == 1);
+	assert(contains(table, 0) && contains(table, 2));
+}
+
 private size_t parityHash(inout(ubyte)[] data) @trusted {
 	int v = *cast(const int*) data.ptr;
 	return v & 1;
@@ -522,12 +544,11 @@ unittest {
 }
 
 unittest {
-	// occupied() on a freshly created (empty) table yields nothing.
+	// occupied() on a freshly created (empty) table yields nothing -- asserted
+	// through the range's own `empty` rather than a foreach, whose body would
+	// by definition never run and so would sit here permanently uncovered.
 	int* table = create!int();
 	scope(exit) free(table);
 
-	size_t count = 0;
-	foreach (v; occupied(table))
-		count++;
-	assert(count == 0);
+	assert(occupied(table).empty);
 }
