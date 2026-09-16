@@ -24,8 +24,6 @@ unittest {
 	assert(hash(a[]) == hash(b[]));
 	assert(hash(a[]) != hash(c[]));
 
-	import std.stdio : printf;
-
 	int[2] ints = [1, 2];
 	assert(hash(ints[]) == -8112618052245560500);
 }

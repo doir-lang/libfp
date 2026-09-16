@@ -2,7 +2,7 @@ module fp.dynarray;
 
 import core.stdc.string : cMemcpy = memcpy, cMemmove = memmove;
 
-import fp.pointer : allocFunction, PointerHeader = Header, PointerType, Array;
+import fp.pointer : allocFunction, AllocFunction, PointerHeader = Header, PointerType, Array;
 public import fp.pointer : length, size, empty, front, back, slice;
 
 package struct Header {
@@ -53,6 +53,11 @@ private void* rawAlloc(size_t payloadBytes) @trusted {
 }
 
 /// Grows/shrinks-in-place-if-possible so `da` has room for `newSize` elements, returning a pointer to element `newSize - 1`.
+///
+/// Returns null if the allocator refused, in which case `da` is left exactly
+/// as it was found — still valid, still the old size. `headerOf(null)` hands
+/// back a shared dummy header rather than faulting, so an unchecked failure
+/// here would not surface until something dereferenced it much later.
 package T* maybeGrow(T)(ref T* da, size_t newSize, bool updateUtilized, bool exactSizing) @trusted {
 	size_t upperPowerOfTwo(size_t v) pure {
 		--v;
@@ -70,6 +75,7 @@ package T* maybeGrow(T)(ref T* da, size_t newSize, bool updateUtilized, bool exa
 		size_t initialCapacity = exactSizing ? newSize : (defaultSizeBytes / T.sizeof);
 		if (initialCapacity == 0) initialCapacity++;
 		da = cast(T*) rawAlloc(initialCapacity * T.sizeof);
+		if (da is null) return null;
 		headerOf(da).capacity = initialCapacity;
 	}
 
@@ -84,6 +90,9 @@ package T* maybeGrow(T)(ref T* da, size_t newSize, bool updateUtilized, bool exa
 	immutable newCapacity = exactSizing ? newSize : upperPowerOfTwo(newSize);
 	T* oldData = da;
 	T* newData = cast(T*) rawAlloc(newCapacity * T.sizeof);
+	// Bail before freeing `oldData`: a caller that cannot grow can still use
+	// what it already had.
+	if (newData is null) return null;
 	Header* newH = headerOf(newData);
 	newH.capacity = newCapacity;
 	newH.base.size = updateUtilized ? (h.base.size > newSize ? h.base.size : newSize) : h.base.size;
@@ -101,7 +110,7 @@ T* growToSize(T)(ref T* da, size_t size) {
 
 T* create(T)(size_t size) {
 	T* da = null;
-	growToSize(da, size);
+	if (growToSize(da, size) is null) return null;
 	return da;
 }
 
@@ -115,17 +124,22 @@ T* reserve(T)(ref T* da, size_t size) {
 	return maybeGrow(da, size, false, true);
 }
 
-void pushBack(T)(ref T* da, T value) {
-	*maybeGrow(da, length(da) + 1, true, false) = value;
+/// Returns false if the array could not grow, leaving it unchanged.
+bool pushBack(T)(ref T* da, T value) {
+	T* slot = maybeGrow(da, length(da) + 1, true, false);
+	if (slot is null) return false;
+	*slot = value;
+	return true;
 }
 
-/// Inserts `count` uninitialized elements at `pos`, returning a pointer to the first of them.
+/// Inserts `count` uninitialized elements at `pos`, returning a pointer to the
+/// first of them, or null if the array could not grow.
 T* insertUninitialized(T)(ref T* da, size_t pos, size_t count) @trusted {
 	assert(count > 0);
 	assert(pos <= length(da));
 
 	immutable oldSize = length(da);
-	maybeGrow(da, oldSize + count, true, false);
+	if (maybeGrow(da, oldSize + count, true, false) is null) return null;
 
 	ubyte* raw = cast(ubyte*) da;
 	ubyte* oldStart = raw + pos * T.sizeof;
@@ -135,12 +149,17 @@ T* insertUninitialized(T)(ref T* da, size_t pos, size_t count) @trusted {
 	return cast(T*) oldStart;
 }
 
-void insert(T)(ref T* da, size_t pos, T value) {
-	*insertUninitialized(da, pos, 1) = value;
+/// Ditto
+bool insert(T)(ref T* da, size_t pos, T value) {
+	T* slot = insertUninitialized(da, pos, 1);
+	if (slot is null) return false;
+	*slot = value;
+	return true;
 }
 
-void pushFront(T)(ref T* da, T value) {
-	insert(da, 0, value);
+/// Ditto
+bool pushFront(T)(ref T* da, T value) {
+	return insert(da, 0, value);
 }
 
 /// Deletes `count` elements starting at `start`; if `matchCapacity`, also reallocates so capacity matches the new (smaller) size exactly.
@@ -156,7 +175,9 @@ T* deleteRange(T)(ref T* da, size_t start, size_t count, bool matchCapacity = fa
 	if (matchCapacity) {
 		immutable newLength = oldSize - count;
 		T* newData = null;
-		growToSize(newData, newLength);
+		// Shrinking is a convenience, not a requirement: if the smaller
+		// allocation is refused, keep the array as it is.
+		if (growToSize(newData, newLength) is null) return null;
 		Header* newH = headerOf(newData);
 		newH.capacity = newLength;
 
@@ -202,14 +223,16 @@ void clear(T)(T* da) @trusted {
 	headerOf(da).base.size = 0;
 }
 
-void swapRange(T)(T* da, size_t start1, size_t start2, size_t count) @trusted {
+/// Returns false if the scratch buffer the swap needs could not be allocated.
+bool swapRange(T)(T* da, size_t start1, size_t start2, size_t count) @trusted {
 	assert(start1 + count <= length(da));
 	assert(start2 + count <= length(da));
-	if (start1 == start2 || count == 0) return;
+	if (start1 == start2 || count == 0) return true;
 
 	immutable bytes = count * T.sizeof;
 	pragma(inline, true);
 	ubyte* scratch = cast(ubyte*) allocFunction(null, bytes);
+	if (scratch is null) return false;
 
 	ubyte* a = cast(ubyte*)(da + start1);
 	ubyte* b = cast(ubyte*)(da + start2);
@@ -219,33 +242,39 @@ void swapRange(T)(T* da, size_t start1, size_t start2, size_t count) @trusted {
 
 	pragma(inline, true);
 	allocFunction(scratch, 0);
+	return true;
 }
 
-void swap(T)(T* da, size_t pos1, size_t pos2) {
-	swapRange(da, pos1, pos2, 1);
+/// Ditto
+bool swap(T)(T* da, size_t pos1, size_t pos2) {
+	return swapRange(da, pos1, pos2, 1);
 }
 
-/// Copies `src`'s elements (and, unless `shrink`, its spare capacity) into `dest`.
-void cloneTo(T)(ref T* dest, inout T* src, bool shrink = false) @trusted {
+/// Copies `src`'s elements (and, unless `shrink`, its spare capacity) into
+/// `dest`. Returns false if `dest` could not be sized to hold them.
+bool cloneTo(T)(ref T* dest, inout T* src, bool shrink = false) @trusted {
 	immutable newCapacity = shrink ? length(src) : capacity(src);
-	growToSize(dest, newCapacity);
+	if (growToSize(dest, newCapacity) is null) return false;
 	cMemcpy(dest, src, length(dest) * T.sizeof);
 	Header* h = headerOf(dest);
 	h.capacity = newCapacity;
 	h.base.size = length(src);
+	return true;
 }
 
 T* clone(T)(inout T* src) {
 	if (src is null) return null;
 	T* result = null;
-	cloneTo(result, src, true);
+	if (!cloneTo(result, src, true)) return null;
 	return result;
 }
 
-void concatenate(T)(ref T* dest, inout(T)[] src) @trusted {
+/// Ditto
+bool concatenate(T)(ref T* dest, inout(T)[] src) @trusted {
 	immutable preSize = length(dest);
-	maybeGrow(dest, preSize + src.length, true, false);
+	if (maybeGrow(dest, preSize + src.length, true, false) is null) return false;
 	cMemcpy(dest + preSize, src.ptr, src.length * T.sizeof);
+	return true;
 }
 
 void concatenate(T)(ref T* dest, inout T* src) {
@@ -384,4 +413,160 @@ unittest {
 	int* arr = null;
 	pushBack(arr, 1);
 	free(cast(const int*) arr);
+}
+
+version(unittest) {
+	/**
+	* Swaps in an allocator that refuses everything, so the out-of-memory
+	* paths can be walked without being out of memory.
+	*
+	* `allocFunction` is a plain global, so this is just a save/restore pair;
+	* the `size == 0` (free) case is still forwarded, or a test could not
+	* clean up after itself.
+	*/
+	package struct RefusingAllocator {
+	@nogc nothrow:
+		private AllocFunction previous;
+
+		static void* refuse(void* p, size_t size) {
+			if (size == 0) return previousAllocator(p, 0);
+			return null;
+		}
+
+		private __gshared AllocFunction previousAllocator;
+
+		static RefusingAllocator install() {
+			RefusingAllocator self;
+			self.previous = allocFunction;
+			previousAllocator = allocFunction;
+			allocFunction = &refuse;
+			return self;
+		}
+
+		void uninstall() { allocFunction = previous; }
+	}
+
+	/**
+	* Like `RefusingAllocator`, but lets the first `n` allocations through
+	* (forwarded to whatever allocator was installed) before refusing every
+	* one after that -- for walking an out-of-memory path that only fails on
+	* a *later* allocation, with an earlier one required to succeed first.
+	*/
+	package struct FailingAfterAllocator {
+	@nogc nothrow:
+		private AllocFunction previous;
+
+		static void* failAfter(void* p, size_t size) {
+			if (size == 0) return previousAllocator(p, 0);
+			if (remaining == 0) return null;
+			remaining--;
+			return previousAllocator(p, size);
+		}
+
+		private __gshared AllocFunction previousAllocator;
+		private __gshared size_t remaining;
+
+		static FailingAfterAllocator install(size_t n) {
+			FailingAfterAllocator self;
+			self.previous = allocFunction;
+			previousAllocator = allocFunction;
+			remaining = n;
+			allocFunction = &failAfter;
+			return self;
+		}
+
+		void uninstall() { allocFunction = previous; }
+	}
+}
+
+unittest {
+	// Every growth path under an allocator that refuses. Before these, a
+	// refused allocation was not reported at all: `headerOf(null)` hands back
+	// a shared dummy header instead of faulting, so `maybeGrow` would carry
+	// on and the failure surfaced later as a null dereference (or, with
+	// asserts on, as `assert(valid(da))` firing three lines further down).
+
+	// Growing from nothing.
+	auto refusing = RefusingAllocator.install();
+	int* fresh = null;
+	assert(growToSize(fresh, 4) is null);
+	assert(fresh is null);     // And nothing was half-built.
+	assert(create!int(4) is null);
+	assert(!pushBack(fresh, 1));
+	refusing.uninstall();
+
+	// Growing something that already exists: the old array has to survive.
+	int* existing = null;
+	assert(pushBack(existing, 11));
+	assert(pushBack(existing, 22));
+	scope(exit) free(existing);
+	// Fill the spare capacity `pushBack` left, so that everything below has
+	// to reallocate and a refusal is the only reason it could fail.
+	while (length(existing) < capacity(existing))
+		assert(pushBack(existing, 0));
+	immutable filled = length(existing);
+	int* before = existing;
+
+	refusing = RefusingAllocator.install();
+	// Big enough that it cannot come out of the spare capacity pushBack left.
+	assert(reserve(existing, 4096) is null);
+	assert(!pushBack(existing, 33));
+	static immutable int[2] more = [44, 55];
+	assert(!concatenate(existing, more[]));
+	assert(insertUninitialized(existing, 0, 4096) is null);
+	assert(!insert(existing, 0, 66));
+	assert(!pushFront(existing, 77));
+	assert(clone(existing) is null);
+	refusing.uninstall();
+
+	// Untouched: same allocation, same contents, same length.
+	assert(existing is before);
+	assert(length(existing) == filled);
+	assert(existing[0] == 11 && existing[1] == 22);
+}
+
+unittest {
+	// `swapRange` needs a scratch buffer, and used to memcpy into it without
+	// checking that it got one.
+	int* array = null;
+	assert(pushBack(array, 1));
+	assert(pushBack(array, 2));
+	scope(exit) free(array);
+
+	auto refusing = RefusingAllocator.install();
+	assert(!swap(array, 0, 1));
+	refusing.uninstall();
+
+	assert(array[0] == 1 && array[1] == 2); // Refused, not half-swapped.
+	assert(swap(array, 0, 1));
+	assert(array[0] == 2 && array[1] == 1);
+}
+
+unittest {
+	// create()'s happy path: every other test either builds an array with
+	// pushBack/growToSize directly or exercises create() only under a
+	// refusing allocator, so its own `return da;` was never reached.
+	int* arr = create!int(3);
+	scope(exit) free(arr);
+
+	assert(arr !is null);
+	assert(length(arr) == 3);
+	assert(capacity(arr) == 3);
+}
+
+unittest {
+	// clone()'s happy path, likewise only ever exercised under a refusing
+	// allocator elsewhere.
+	int* src = null;
+	scope(exit) free(src);
+	foreach (i; 0 .. 3)
+		assert(pushBack(src, i * 10));
+
+	int* copy = clone(src);
+	scope(exit) free(copy);
+
+	assert(copy !is null);
+	assert(copy != src);
+	assert(length(copy) == 3);
+	assert(copy[0] == 0 && copy[1] == 10 && copy[2] == 20);
 }

@@ -41,10 +41,11 @@ void free(ref char* str) @trusted {
 	}
 }
 
+/// Returns a newly allocated copy of `view`, or null if it could not be allocated.
 char* makeDynamicSlice(inout(char)[] view) @trusted {
 	if (view.length == 0) return null;
 	char* out_ = null;
-	growToSize(out_, view.length);
+	if (growToSize(out_, view.length) is null) return null;
 	cMemcpy(out_, view.ptr, view.length);
 	return out_;
 }
@@ -72,7 +73,9 @@ char* concatenateSlice(ref char* a, inout(char)[] b) @trusted {
 	immutable sizeA = length(a);
 	immutable sizeB = b.length;
 	if (sizeA + sizeB == 0) return null;
-	growToSize(a, sizeA + sizeB);
+	// `a` is left holding exactly what it did before if this fails, so a
+	// caller that ignores the result still has a usable string.
+	if (growToSize(a, sizeA + sizeB) is null) return null;
 	cMemcpy(a + sizeA, b.ptr, sizeB);
 	return a;
 }
@@ -174,7 +177,7 @@ uint* codepoints(inout char* str) @trusted {
 // Returns a newly allocated string that must be freed by the caller. Returns null on error.
 char* fromCodepointsSlice(inout(uint)[] codepoints) @trusted {
 	char* out_ = null;
-	reserve(out_, codepoints.length);
+	if (reserve(out_, codepoints.length) is null) return null;
 
 	foreach (cp; codepoints) {
 		char[4] temp;
@@ -283,7 +286,7 @@ char* replaceRangeSlice(ref char* in_, inout(char)[] with_, size_t start, size_t
 		deleteRange(in_, start + withLen, diff, false);
 	} else if (withLen > rangeLen) {
 		immutable diff = withLen - rangeLen;
-		grow(in_, diff);
+		if (grow(in_, diff) is null) return null;
 		cMemmove(in_ + end + diff, in_ + end, inLen - end);
 		cMemcpy(in_ + start, with_.ptr, withLen);
 	} else {
@@ -326,7 +329,7 @@ extern (C) char* format(inout char* fmt, ...) @trusted {
 	va_end(argsSize);
 
 	char* out_ = null;
-	growToSize(out_, size);
+	if (growToSize(out_, size) is null) return null;
 
 	va_list args;
 	va_start(args, fmt);

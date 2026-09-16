@@ -92,6 +92,8 @@ private T* growExact(T)(ref T* table, size_t newSize) @trusted {
 
 	T* oldData = table;
 	T* newData = cast(T*) rawAlloc(newSize * T.sizeof);
+	// Bail before freeing `oldData`: the table is still usable at its old size.
+	if (newData is null) return null;
 	Header* newH = headerOf(newData);
 	newH.base.capacity = newSize;
 	newH.base.base.size = h.base.base.size > newSize ? h.base.base.size : newSize;
@@ -104,29 +106,35 @@ private T* growExact(T)(ref T* table, size_t newSize) @trusted {
 	return table + (newSize - 1);
 }
 
-private void growAndInitialize(T)(ref T* da, size_t toAdd, T value) @trusted {
+private bool growAndInitialize(T)(ref T* da, size_t toAdd, T value) @trusted {
 	immutable oldSize = length(da);
-	grow(da, toAdd);
+	if (grow(da, toAdd) is null) return false;
 	foreach (i; oldSize .. length(da))
 		da[i] = value;
+	return true;
 }
 
-private void growToSizeAndInitialize(T)(ref T* da, size_t size, T value) @trusted {
+private bool growToSizeAndInitialize(T)(ref T* da, size_t size, T value) @trusted {
 	immutable oldSize = length(da);
-	growToSize(da, size);
+	if (growToSize(da, size) is null) return false;
 	foreach (i; oldSize .. length(da))
 		da[i] = value;
+	return true;
 }
 
 /// Creates a table with `config.baseSize` slots.
 T* create(T)(Config config = Config.init) @trusted {
 	T* outp = cast(T*) rawAlloc(T.sizeof * config.baseSize);
+	if (outp is null) return null;
 	Header* h = headerOf(outp);
 	h.base.capacity = config.baseSize;
 	h.base.base.size = config.baseSize;
 	h.config = config;
 	h.entryInfos = null;
-	growToSizeAndInitialize(h.entryInfos, config.baseSize, size_t(0));
+	if (!growToSizeAndInitialize(h.entryInfos, config.baseSize, size_t(0))) {
+		allocFunction(headerOf(outp), 0);
+		return null;
+	}
 	return outp;
 }
 
@@ -202,7 +210,8 @@ size_t rehash(T)(ref T* table, size_t failures) @trusted {
 	{
 		immutable entriesSize = length(headerOf(table).entryInfos);
 		if (entriesSize < size)
-			growAndInitialize(headerOf(table).entryInfos, size - entriesSize, size_t(0));
+			if (!growAndInitialize(headerOf(table).entryInfos, size - entriesSize, size_t(0)))
+				return 0;
 	}
 
 	// Snapshot every occupied slot's data *before* touching any entryInfos
@@ -219,8 +228,8 @@ size_t rehash(T)(ref T* table, size_t failures) @trusted {
 	T* snapshot = null;
 	size_t* positions = null;
 	scope(exit) { dynFree(snapshot); dynFree(positions); }
-	growToSize(snapshot, size);
-	growToSize(positions, size);
+	if (growToSize(snapshot, size) is null) return 0;
+	if (growToSize(positions, size) is null) return 0;
 
 	size_t occupiedCount = 0;
 	ubyte* snapshotP = cast(ubyte*) snapshot;
@@ -244,19 +253,21 @@ size_t rehash(T)(ref T* table, size_t failures) @trusted {
 }
 
 /// Doubles the table's capacity and rebuilds every bucket assignment.
-/// Returns `notFound` on success, or the index rehashing failed at.
+/// Returns `notFound` on success, or the index rehashing failed at — or 0 if
+/// an allocation it needed was refused, which is not an index but is likewise
+/// not `notFound`, so callers already read it as failure.
 private size_t doubleSizeAndRehash(T)(ref T* table, size_t failures) @trusted {
 	immutable size = length(table);
 	immutable newSize = size * 2;
-	growExact(table, newSize);
-	growAndInitialize(headerOf(table).entryInfos, size, size_t(0));
+	if (growExact(table, newSize) is null) return 0;
+	if (!growAndInitialize(headerOf(table).entryInfos, size, size_t(0))) return 0;
 
 	ubyte* tableP = cast(ubyte*) table;
 	foreach (i; 0 .. size) {
 		if (i % 2 == 1) {
 			copyInto(table, tableP + (newSize - i) * T.sizeof, tableP + i * T.sizeof, T.sizeof);
 			cMemset(tableP + i * T.sizeof, 0, T.sizeof);
-			swap(headerOf(table).entryInfos, i, newSize - i);
+			if (!swap(headerOf(table).entryInfos, i, newSize - i)) return 0;
 		}
 	}
 
@@ -380,6 +391,38 @@ unittest {
 
 	growExact(table, 20);
 	assert(rehash(table, 0) == notFound);
+}
+
+unittest {
+	// rehash()'s own out-of-memory report: catching entryInfos up to the
+	// (already desynced) table capacity needs an allocation, and a refused
+	// one is reported as 0, not mistaken for `notFound`.
+	import fp.dynarray : RefusingAllocator;
+
+	int* table = create!int();
+	scope(exit) free(table);
+
+	growExact(table, 20);
+	auto refusing = RefusingAllocator.install();
+	assert(rehash(table, 0) == 0);
+	refusing.uninstall();
+
+	// Nothing was left half-caught-up: retrying with memory available
+	// still succeeds.
+	assert(rehash(table, 0) == notFound);
+}
+
+unittest {
+	// create()'s own cleanup path: growing entryInfos to match baseSize is
+	// a second allocation after the table's own, and if it's refused, the
+	// table just allocated is freed rather than leaked, and null reported.
+	import fp.dynarray : FailingAfterAllocator;
+
+	auto failing = FailingAfterAllocator.install(1); // table's own alloc succeeds, entryInfos' doesn't
+	int* table = create!int();
+	failing.uninstall();
+
+	assert(table is null);
 }
 
 unittest {
