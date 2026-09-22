@@ -113,7 +113,38 @@ char* append(ref char* str, char c) @trusted {
 	return str;
 }
 
-private size_t encodeUtf8(uint codepoint, char* out_) @trusted {
+// ASCII character classes.
+bool isDigit(char c) { return c >= '0' && c <= '9'; }
+bool isOctalDigit(char c) { return c >= '0' && c <= '7'; }
+bool isHexDigit(char c) { return isDigit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'); }
+bool isAsciiAlpha(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
+
+unittest {
+	assert(isDigit('0') && isDigit('9') && !isDigit('a') && !isDigit('/'));
+	assert(isOctalDigit('7') && !isOctalDigit('8'));
+	assert(isHexDigit('0') && isHexDigit('f') && isHexDigit('F') && !isHexDigit('g'));
+	assert(isAsciiAlpha('a') && isAsciiAlpha('Z') && !isAsciiAlpha('0'));
+}
+
+/// Why a codepoint is not encodable as UTF-8.
+enum Utf8Error : ubyte {
+	none,
+	outOfRange,  /// above U+10FFFF
+	surrogate,   /// U+D800-U+DFFF: UTF-16 machinery, never valid in UTF-8
+}
+
+/// Encodes `codepoint` into `out_` (which must have room for four bytes),
+/// returning the number of bytes written, or 0 with `err` set.
+size_t encodeUtf8(uint codepoint, char* out_, out Utf8Error err) @trusted {
+	if (codepoint > 0x10FFFF) {
+		err = Utf8Error.outOfRange;
+		return 0;
+	}
+	if (codepoint >= 0xD800 && codepoint <= 0xDFFF) {
+		err = Utf8Error.surrogate;
+		return 0;
+	}
+
 	if (codepoint <= 0x7F) {
 		out_[0] = cast(char) codepoint;
 		return 1;
@@ -126,43 +157,70 @@ private size_t encodeUtf8(uint codepoint, char* out_) @trusted {
 		out_[1] = cast(char)(0x80 | ((codepoint >> 6) & 0x3F));
 		out_[2] = cast(char)(0x80 | (codepoint & 0x3F));
 		return 3;
-	} else if (codepoint <= 0x10FFFF) {
-		out_[0] = cast(char)(0xF0 | (codepoint >> 18));
-		out_[1] = cast(char)(0x80 | ((codepoint >> 12) & 0x3F));
-		out_[2] = cast(char)(0x80 | ((codepoint >> 6) & 0x3F));
-		out_[3] = cast(char)(0x80 | (codepoint & 0x3F));
-		return 4;
 	}
-	return 0;
+	out_[0] = cast(char)(0xF0 | (codepoint >> 18));
+	out_[1] = cast(char)(0x80 | ((codepoint >> 12) & 0x3F));
+	out_[2] = cast(char)(0x80 | ((codepoint >> 6) & 0x3F));
+	out_[3] = cast(char)(0x80 | (codepoint & 0x3F));
+	return 4;
+}
+
+size_t encodeUtf8(uint codepoint, char* out_) @trusted {
+	Utf8Error ignored;
+	return encodeUtf8(codepoint, out_, ignored);
+}
+
+/// Decodes the codepoint starting at `s[i]`, advancing `i` past it.
+///
+/// The continuation bytes a lead byte promises are checked against the end of
+/// `s` before they are read, so this is safe to run over arbitrary bytes - a
+/// string literal can hold a truncated sequence (`"\xE2"` is a lead byte with
+/// nothing behind it). A truncated or otherwise malformed sequence clears
+/// `valid`, decodes as the lead byte itself and consumes one byte, so a caller
+/// that ignores `valid` still makes progress and never reads past the slice.
+uint decodeUtf8(const(char)[] s, ref size_t i, out bool valid) @trusted {
+	valid = true;
+	immutable c = cast(ubyte) s[i];
+
+	if (c < 0x80) {
+		return cast(uint) s[i++];
+	} else if ((c >> 5) == 0x6 && i + 1 < s.length) {
+		immutable cp = ((c & 0x1F) << 6) | (cast(ubyte) s[i + 1] & 0x3F);
+		i += 2;
+		return cp;
+	} else if ((c >> 4) == 0xE && i + 2 < s.length) {
+		immutable cp = ((c & 0x0F) << 12)
+			| ((cast(ubyte) s[i + 1] & 0x3F) << 6)
+			| (cast(ubyte) s[i + 2] & 0x3F);
+		i += 3;
+		return cp;
+	} else if ((c >> 3) == 0x1E && i + 3 < s.length) {
+		immutable cp = ((c & 0x07) << 18)
+			| ((cast(ubyte) s[i + 1] & 0x3F) << 12)
+			| ((cast(ubyte) s[i + 2] & 0x3F) << 6)
+			| (cast(ubyte) s[i + 3] & 0x3F);
+		i += 4;
+		return cp;
+	}
+	valid = false;
+	++i;
+	return c;
+}
+
+uint decodeUtf8(const(char)[] s, ref size_t i) @trusted {
+	bool ignored;
+	return decodeUtf8(s, i, ignored);
 }
 
 // Returns a newly allocated string that must be freed by the caller. Returns null on error.
 uint* codepointsSlice(inout(char)[] view) @trusted {
-	const(ubyte)* s = cast(const(ubyte)*) view.ptr;
 	uint* out_ = null;
 	size_t i = 0;
 
 	while (i < view.length) {
-		uint codepoint = 0;
-		if (s[i] < 0x80) {
-			codepoint = s[i];
-			i += 1;
-		} else if ((s[i] >> 5) == 0x6) {
-			codepoint = (s[i] & 0x1F) << 6;
-			codepoint |= (s[i + 1] & 0x3F);
-			i += 2;
-		} else if ((s[i] >> 4) == 0xE) {
-			codepoint = (s[i] & 0x0F) << 12;
-			codepoint |= (s[i + 1] & 0x3F) << 6;
-			codepoint |= (s[i + 2] & 0x3F);
-			i += 3;
-		} else if ((s[i] >> 3) == 0x1E) {
-			codepoint = (s[i] & 0x07) << 18;
-			codepoint |= (s[i + 1] & 0x3F) << 12;
-			codepoint |= (s[i + 2] & 0x3F) << 6;
-			codepoint |= (s[i + 3] & 0x3F);
-			i += 4;
-		} else {
+		bool valid;
+		immutable codepoint = decodeUtf8(cast(const(char)[]) view, i, valid);
+		if (!valid) {
 			if (out_ !is null) daFree(out_);
 			return null;
 		}
@@ -480,6 +538,43 @@ unittest {
 	// codepointsSlice rejecting an invalid UTF-8 lead byte.
 	ubyte[1] invalidByte = [0x80];
 	assert(codepointsSlice(cast(char[]) invalidByte[]) is null);
+
+	// A surrogate half is UTF-16 machinery, never encodable as UTF-8.
+	uint[1] surrogate = [0xD800];
+	assert(fromCodepointsSlice(surrogate[]) is null);
+
+	char[4] buffer;
+	Utf8Error err;
+	assert(encodeUtf8(0x110000, buffer.ptr, err) == 0 && err == Utf8Error.outOfRange);
+	assert(encodeUtf8(0xDC00, buffer.ptr, err) == 0 && err == Utf8Error.surrogate);
+	assert(encodeUtf8(0x1F600, buffer.ptr, err) == 4 && err == Utf8Error.none);
+}
+
+unittest { // decodeUtf8 handles each sequence length, and truncation at each
+	static immutable string[4] whole = ["A", "\xc3\xa9", "\xe2\x82\xac", "\xf0\x9f\x98\x80"];
+	static immutable uint[4] expected = [0x41, 0xE9, 0x20AC, 0x1F600];
+	foreach (n, s; whole) {
+		size_t i = 0;
+		bool valid;
+		assert(decodeUtf8(s, i, valid) == expected[n]);
+		assert(valid && i == s.length);
+	}
+
+	// A lead byte with its continuation bytes cut off decodes as itself and
+	// still advances, so the caller cannot loop forever or read past the end.
+	foreach (s; whole[1 .. $]) {
+		auto truncated = s[0 .. $ - 1];
+		size_t i = 0;
+		bool valid;
+		immutable cp = decodeUtf8(truncated, i, valid);
+		assert(i > 0);
+		assert(cp == cast(ubyte) truncated[0] || i == truncated.length);
+	}
+
+	// The truncated three- and four-byte sequences are what used to read past
+	// the end of the slice inside codepointsSlice.
+	assert(codepointsSlice("\xe2\x82") is null);
+	assert(codepointsSlice("\xf0\x9f\x98") is null);
 }
 
 unittest {
