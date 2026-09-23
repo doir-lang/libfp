@@ -1,11 +1,9 @@
 module fp.hashtable;
 
-import core.stdc.string : cMemcpy = memcpy, cMemcmp = memcmp, cMemset = memset;
+import core.stdc.string;
 
-import fp.pointer : allocFunction, PointerType, notFound;
-import fp.dynarray : length, grow, growToSize, swap;
-import fp.dynarray : dynFree = free;
-import fp.dynarray : DynarrayHeader = Header;
+import fp.pointer;
+import fp.dynarray;
 import fp.fnv1a;
 
 
@@ -23,11 +21,11 @@ private size_t defaultHash(inout(ubyte)[] data) @nogc nothrow {
 
 private bool defaultEqual(inout(ubyte)[] a, inout(ubyte)[] b) @trusted {
 	if (a.length != b.length) return false;
-	return cMemcmp(a.ptr, b.ptr, a.length) == 0;
+	return core.stdc.string.memcmp(a.ptr, b.ptr, a.length) == 0;
 }
 
 private void* defaultCopy(void* dest, inout(void)* src, size_t n) @trusted {
-	return cMemcpy(dest, src, n);
+	return core.stdc.string.memcpy(dest, src, n);
 }
 
 struct Config {
@@ -43,7 +41,7 @@ struct Config {
 package struct Header {
 	size_t* entryInfos;
 	Config config;
-	DynarrayHeader base;
+	fp.dynarray.Header base;
 }
 
 private enum size_t occupiedBit = size_t(1) << 31;
@@ -100,23 +98,18 @@ private T* growExact(T)(ref T* table, size_t newSize) @trusted {
 	newH.entryInfos = h.entryInfos;
 	newH.config = h.config;
 
-	cMemcpy(newData, oldData, T.sizeof * h.base.base.size);
+	core.stdc.string.memcpy(newData, oldData, T.sizeof * h.base.base.size);
 	allocFunction(headerOf(oldData), 0);
 	table = newData;
 	return table + (newSize - 1);
 }
 
-private bool growAndInitialize(T)(ref T* da, size_t toAdd, T value) @trusted {
+/// Grows `da` to `newSize` and sets the slots that adds, which the dynarray
+/// itself leaves uninitialized. `exactSizing` means what `maybeGrow` means by
+/// it: the capacity matches the size rather than rounding up to a power of two.
+private bool growAndInitialize(T)(ref T* da, size_t newSize, T value, bool exactSizing) @trusted {
 	immutable oldSize = length(da);
-	if (grow(da, toAdd) is null) return false;
-	foreach (i; oldSize .. length(da))
-		da[i] = value;
-	return true;
-}
-
-private bool growToSizeAndInitialize(T)(ref T* da, size_t size, T value) @trusted {
-	immutable oldSize = length(da);
-	if (growToSize(da, size) is null) return false;
+	if (maybeGrow(da, newSize, true, exactSizing) is null) return false;
 	foreach (i; oldSize .. length(da))
 		da[i] = value;
 	return true;
@@ -131,7 +124,7 @@ T* create(T)(Config config = Config.init) @trusted {
 	h.base.base.size = config.baseSize;
 	h.config = config;
 	h.entryInfos = null;
-	if (!growToSizeAndInitialize(h.entryInfos, config.baseSize, size_t(0))) {
+	if (!growAndInitialize(h.entryInfos, config.baseSize, size_t(0), true)) {
 		allocFunction(headerOf(outp), 0);
 		return null;
 	}
@@ -207,12 +200,9 @@ T* insertAssumeUnique(T)(ref T* table, T key) @trusted {
 
 size_t rehash(T)(ref T* table, size_t failures) @trusted {
 	immutable size = length(table);
-	{
-		immutable entriesSize = length(headerOf(table).entryInfos);
-		if (entriesSize < size)
-			if (!growAndInitialize(headerOf(table).entryInfos, size - entriesSize, size_t(0)))
-				return 0;
-	}
+	if (length(headerOf(table).entryInfos) < size)
+		if (!growAndInitialize(headerOf(table).entryInfos, size, size_t(0), false))
+			return 0;
 
 	// Snapshot every occupied slot's data *before* touching any entryInfos
 	// bits. Clearing entryInfos[i] one index at a time while reinserting (as
@@ -227,7 +217,7 @@ size_t rehash(T)(ref T* table, size_t failures) @trusted {
 	ubyte* tableP = cast(ubyte*) table;
 	T* snapshot = null;
 	size_t* positions = null;
-	scope(exit) { dynFree(snapshot); dynFree(positions); }
+	scope(exit) { fp.dynarray.free(snapshot); fp.dynarray.free(positions); }
 	if (growToSize(snapshot, size) is null) return 0;
 	if (growToSize(positions, size) is null) return 0;
 
@@ -260,13 +250,13 @@ private size_t doubleSizeAndRehash(T)(ref T* table, size_t failures) @trusted {
 	immutable size = length(table);
 	immutable newSize = size * 2;
 	if (growExact(table, newSize) is null) return 0;
-	if (!growAndInitialize(headerOf(table).entryInfos, size, size_t(0))) return 0;
+	if (!growAndInitialize(headerOf(table).entryInfos, newSize, size_t(0), false)) return 0;
 
 	ubyte* tableP = cast(ubyte*) table;
 	foreach (i; 0 .. size) {
 		if (i % 2 == 1) {
 			copyInto(table, tableP + (newSize - i) * T.sizeof, tableP + i * T.sizeof, T.sizeof);
-			cMemset(tableP + i * T.sizeof, 0, T.sizeof);
+			core.stdc.string.memset(tableP + i * T.sizeof, 0, T.sizeof);
 			if (!swap(headerOf(table).entryInfos, i, newSize - i)) return 0;
 		}
 	}
@@ -357,18 +347,25 @@ private void finalizeAll(T)(T* table) @trusted {
 }
 
 void free(T)(ref T* table) @trusted {
+	// `headerOf(null)` hands back the shared dummy header, so without this a
+	// freed-twice (or never-created) table would free that instead. Matches
+	// `fp.dynarray.free`/`fp.string.free`, both of which take null.
+	if (table is null) return;
 	finalizeAll(table);
 	size_t* entries = headerOf(table).entryInfos;
-	dynFree(entries);
+	fp.dynarray.free(entries);
 	allocFunction(headerOf(table), 0);
 	table = null;
 }
 
 unittest {
-	// headerOf(null) / valid / capacity on a never-created table.
+	// headerOf(null) / valid / capacity on a never-created table, which is
+	// also safe to free.
 	int* neverCreated = null;
 	assert(!valid_hashtable(neverCreated));
 	assert(capacity(neverCreated) == 0);
+	free(neverCreated);
+	assert(neverCreated is null);
 }
 
 unittest {
@@ -397,15 +394,13 @@ unittest {
 	// rehash()'s own out-of-memory report: catching entryInfos up to the
 	// (already desynced) table capacity needs an allocation, and a refused
 	// one is reported as 0, not mistaken for `notFound`.
-	import fp.dynarray : RefusingAllocator;
-
 	int* table = create!int();
 	scope(exit) free(table);
 
 	growExact(table, 20);
-	auto refusing = RefusingAllocator.install();
+	auto previous = beginRationedAllocator();
 	assert(rehash(table, 0) == 0);
-	refusing.uninstall();
+	endRationedAllocator(previous);
 
 	// Nothing was left half-caught-up: retrying with memory available
 	// still succeeds.
@@ -416,11 +411,9 @@ unittest {
 	// create()'s own cleanup path: growing entryInfos to match baseSize is
 	// a second allocation after the table's own, and if it's refused, the
 	// table just allocated is freed rather than leaked, and null reported.
-	import fp.dynarray : FailingAfterAllocator;
-
-	auto failing = FailingAfterAllocator.install(1); // table's own alloc succeeds, entryInfos' doesn't
+	auto previous = beginRationedAllocator(1); // the table's own alloc succeeds, entryInfos' doesn't
 	int* table = create!int();
-	failing.uninstall();
+	endRationedAllocator(previous);
 
 	assert(table is null);
 }

@@ -1,6 +1,6 @@
 module fp.pointer;
 
-import core.stdc.stdlib : cRealloc = realloc, cFree = free, cAlloca = alloca;
+import core.stdc.stdlib;
 
 /**
 * Signature of the function used to allocate/reallocate/free the raw memory
@@ -18,10 +18,10 @@ alias AllocFunction = void* function(void* p, size_t size) @nogc nothrow;
 
 private void* defaultAllocFunction(void* p, size_t size) @nogc nothrow {
 	if (size == 0) {
-		if (p !is null) cFree(p);
+		if (p !is null) core.stdc.stdlib.free(p);
 		return null;
 	}
-	return cRealloc(p, size);
+	return core.stdc.stdlib.realloc(p, size);
 }
 
 /// The allocator currently used by the library. Reassign to customize.
@@ -42,13 +42,18 @@ package enum PointerType : ushort {
 private enum ushort validityMask = 0xFF00;
 private enum ushort validityTag = 0xFE00;
 
-package struct Header {
+struct Header {
 	PointerType type;
 	size_t size;
 }
 
 enum size_t notFound = size_t.max;
 
+// `pragma(inline, true)` on the three accessors below, and not left to the
+// optimizer: they are plain functions in this object file, so a caller in
+// another dub package cannot inline them without LTO, and every `length` on a
+// fat pointer was paying a real call for two loads.
+pragma(inline, true)
 package inout(Header)* headerOf(inout(void)* p) @trusted {
 	return cast(inout(Header)*)(cast(const(ubyte)*) p - Header.sizeof);
 }
@@ -76,9 +81,8 @@ package void* rawAlloc(void* p, size_t size) @trusted {
 package void* rawRealloc(void* p, size_t elemSize, size_t count) @trusted {
 	void* data = rawAlloc(p, elemSize * count);
 	if (data is null) return null;
-	Header* h = headerOf(data);
-	h.type = PointerType.heap;
-	h.size = count;
+	// `rawAlloc` recorded the byte count; a fat pointer's size is in elements.
+	headerOf(data).size = count;
 	return data;
 }
 
@@ -98,6 +102,7 @@ void free(T)(ref T* p) {
 	p = null;
 }
 
+pragma(inline, true)
 bool valid(inout void* p) @trusted {
 	if (p is null) return false;
 	inout(Header)* h = headerOf(p);
@@ -109,7 +114,7 @@ bool valid(inout void* p) @trusted {
 	// plain heap/stack allocation has nothing there, so reading it would
 	// walk off the front of the allocation.
 	if (h.type != PointerType.dynarray && h.type != PointerType.hashTable) return false;
-	size_t capacity = *cast(const(size_t)*)(cast(const(ubyte)*) h - size_t.sizeof);
+	immutable capacity = *cast(const(size_t)*)(cast(const(ubyte)*) h - size_t.sizeof);
 	return capacity > 0;
 }
 
@@ -128,6 +133,7 @@ bool heapAllocated(inout void* p) {
 }
 
 /// Number of elements in the fat pointer `p` (not bytes).
+pragma(inline, true)
 size_t length(inout void* p) {
 	if (!valid(p)) return 0;
 	return headerOf(p).size;
@@ -198,9 +204,12 @@ version(DigitalMars) {
 	* ---
 	*/
 	mixin template alloca(T, string name, string countExpr) {
+		// Mixed into the caller's scope, so the caller needs `core.stdc.stdlib`
+		// in scope for the fully qualified `alloca` below to resolve.
+		import core.stdc.stdlib;
 		mixin(
 			"auto __" ~ name ~ "_count = cast(size_t)(" ~ countExpr ~ ");" 
-			~ "ubyte* __" ~ name ~ "_raw = cast(ubyte*) fp.pointer.cAlloca(" ~ "fp.pointer.Header.sizeof + " ~ T.stringof ~ ".sizeof * __" ~ name ~ "_count + 1);" 
+			~ "ubyte* __" ~ name ~ "_raw = cast(ubyte*) core.stdc.stdlib.alloca(" ~ "fp.pointer.Header.sizeof + " ~ T.stringof ~ ".sizeof * __" ~ name ~ "_count + 1);" 
 			~ T.stringof ~ "* " ~ name ~ " = fp.pointer.initStackHeader(cast(" ~ T.stringof ~ "*)(__" ~ name ~ "_raw + fp.pointer.Header.sizeof), __" ~ name ~ "_count);"
 		);
 	}

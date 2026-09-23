@@ -1,13 +1,13 @@
 module fp.dynarray;
 
-import core.stdc.string : cMemcpy = memcpy, cMemmove = memmove;
+import core.stdc.string;
 
-import fp.pointer : allocFunction, AllocFunction, PointerHeader = Header, PointerType, Array;
+import fp.pointer;
 public import fp.pointer : length, size, empty, front, back, slice;
 
 package struct Header {
 	size_t capacity;
-	PointerHeader base;
+	fp.pointer.Header base;
 }
 
 private enum size_t defaultSizeBytes = 16;
@@ -96,7 +96,7 @@ package T* maybeGrow(T)(ref T* da, size_t newSize, bool updateUtilized, bool exa
 	Header* newH = headerOf(newData);
 	newH.capacity = newCapacity;
 	newH.base.size = updateUtilized ? (h.base.size > newSize ? h.base.size : newSize) : h.base.size;
-	cMemcpy(newData, oldData, T.sizeof * h.base.size);
+	core.stdc.string.memcpy(newData, oldData, T.sizeof * h.base.size);
 
 	allocFunction(headerOf(oldData), 0);
 	da = newData;
@@ -145,7 +145,7 @@ T* insertUninitialized(T)(ref T* da, size_t pos, size_t count) @trusted {
 	ubyte* oldStart = raw + pos * T.sizeof;
 	ubyte* newStart = oldStart + count * T.sizeof;
 	immutable bytesToMove = (raw + length(da) * T.sizeof) - newStart;
-	cMemmove(newStart, oldStart, bytesToMove);
+	core.stdc.string.memmove(newStart, oldStart, bytesToMove);
 	return cast(T*) oldStart;
 }
 
@@ -184,15 +184,15 @@ T* deleteRange(T)(ref T* da, size_t start, size_t count, bool matchCapacity = fa
 		ubyte* newRaw = cast(ubyte*) newData;
 		ubyte* insertedStart = newRaw + start * T.sizeof;
 		if (oldStart != raw)
-			cMemcpy(newRaw, raw, insertedStart - newRaw);
-		cMemcpy(insertedStart, oldStart, bytesToMove);
+			core.stdc.string.memcpy(newRaw, raw, insertedStart - newRaw);
+		core.stdc.string.memcpy(insertedStart, oldStart, bytesToMove);
 
 		allocFunction(headerOf(da), 0);
 		da = newData;
 		newStart = insertedStart;
 	} else if (count > 0) {
 		headerOf(da).base.size -= count;
-		cMemmove(newStart, oldStart, bytesToMove);
+		core.stdc.string.memmove(newStart, oldStart, bytesToMove);
 	}
 
 	return cast(T*) newStart;
@@ -230,17 +230,15 @@ bool swapRange(T)(T* da, size_t start1, size_t start2, size_t count) @trusted {
 	if (start1 == start2 || count == 0) return true;
 
 	immutable bytes = count * T.sizeof;
-	pragma(inline, true);
 	ubyte* scratch = cast(ubyte*) allocFunction(null, bytes);
 	if (scratch is null) return false;
 
 	ubyte* a = cast(ubyte*)(da + start1);
 	ubyte* b = cast(ubyte*)(da + start2);
-	cMemcpy(scratch, a, bytes);
-	cMemcpy(a, b, bytes);
-	cMemcpy(b, scratch, bytes);
+	core.stdc.string.memcpy(scratch, a, bytes);
+	core.stdc.string.memcpy(a, b, bytes);
+	core.stdc.string.memcpy(b, scratch, bytes);
 
-	pragma(inline, true);
 	allocFunction(scratch, 0);
 	return true;
 }
@@ -255,7 +253,7 @@ bool swap(T)(T* da, size_t pos1, size_t pos2) {
 bool cloneTo(T)(ref T* dest, inout T* src, bool shrink = false) @trusted {
 	immutable newCapacity = shrink ? length(src) : capacity(src);
 	if (growToSize(dest, newCapacity) is null) return false;
-	cMemcpy(dest, src, length(dest) * T.sizeof);
+	core.stdc.string.memcpy(dest, src, length(dest) * T.sizeof);
 	Header* h = headerOf(dest);
 	h.capacity = newCapacity;
 	h.base.size = length(src);
@@ -273,7 +271,7 @@ T* clone(T)(inout T* src) {
 bool concatenate(T)(ref T* dest, inout(T)[] src) @trusted {
 	immutable preSize = length(dest);
 	if (maybeGrow(dest, preSize + src.length, true, false) is null) return false;
-	cMemcpy(dest + preSize, src.ptr, src.length * T.sizeof);
+	core.stdc.string.memcpy(dest + preSize, src.ptr, src.length * T.sizeof);
 	return true;
 }
 
@@ -282,12 +280,10 @@ void concatenate(T)(ref T* dest, inout T* src) {
 }
 
 void free(T)(const T* da) @trusted {
-	if (headerOf(da) != &nullHeaderRef)
-		allocFunction(headerOf(da), 0);
+	if (da !is null) allocFunction(headerOf(da), 0);
 }
 void free(T)(ref T* da) @trusted {
-	if (headerOf(da) != &nullHeaderRef)
-		allocFunction(headerOf(da), 0);
+	free(cast(const T*) da);
 	da = null;
 }
 
@@ -416,66 +412,37 @@ unittest {
 }
 
 version(unittest) {
-	/**
-	* Swaps in an allocator that refuses everything, so the out-of-memory
-	* paths can be walked without being out of memory.
-	*
-	* `allocFunction` is a plain global, so this is just a save/restore pair;
-	* the `size == 0` (free) case is still forwarded, or a test could not
-	* clean up after itself.
-	*/
-	package struct RefusingAllocator {
-	@nogc nothrow:
-		private AllocFunction previous;
+	private __gshared AllocFunction rationedUnderlying;
+	private __gshared size_t rationedRemaining;
 
-		static void* refuse(void* p, size_t size) {
-			if (size == 0) return previousAllocator(p, 0);
-			return null;
-		}
-
-		private __gshared AllocFunction previousAllocator;
-
-		static RefusingAllocator install() {
-			RefusingAllocator self;
-			self.previous = allocFunction;
-			previousAllocator = allocFunction;
-			allocFunction = &refuse;
-			return self;
-		}
-
-		void uninstall() { allocFunction = previous; }
+	private void* rationedAlloc(void* p, size_t size) @nogc nothrow {
+		// Frees are always forwarded, or a test could not clean up after itself.
+		if (size == 0) return rationedUnderlying(p, 0);
+		if (rationedRemaining == 0) return null;
+		--rationedRemaining;
+		return rationedUnderlying(p, size);
 	}
 
 	/**
-	* Like `RefusingAllocator`, but lets the first `n` allocations through
-	* (forwarded to whatever allocator was installed) before refusing every
-	* one after that -- for walking an out-of-memory path that only fails on
-	* a *later* allocation, with an earlier one required to succeed first.
+	* Installs an allocator that lets the next `n` allocations through and
+	* refuses every one after that, so the out-of-memory paths can be walked
+	* without being out of memory. `n` of 0 refuses everything; a larger `n`
+	* reaches a failure that only a *later* allocation can produce.
+	*
+	* `allocFunction` is a plain global, so this is a save/restore pair: hand
+	* what it returns to `endRationedAllocator`, from a `scope(exit)`.
 	*/
-	package struct FailingAfterAllocator {
-	@nogc nothrow:
-		private AllocFunction previous;
+	package AllocFunction beginRationedAllocator(size_t n = 0) @nogc nothrow {
+		AllocFunction previous = allocFunction;
+		rationedUnderlying = previous;
+		rationedRemaining = n;
+		allocFunction = &rationedAlloc;
+		return previous;
+	}
 
-		static void* failAfter(void* p, size_t size) {
-			if (size == 0) return previousAllocator(p, 0);
-			if (remaining == 0) return null;
-			remaining--;
-			return previousAllocator(p, size);
-		}
-
-		private __gshared AllocFunction previousAllocator;
-		private __gshared size_t remaining;
-
-		static FailingAfterAllocator install(size_t n) {
-			FailingAfterAllocator self;
-			self.previous = allocFunction;
-			previousAllocator = allocFunction;
-			remaining = n;
-			allocFunction = &failAfter;
-			return self;
-		}
-
-		void uninstall() { allocFunction = previous; }
+	/// Ditto.
+	package void endRationedAllocator(AllocFunction previous) @nogc nothrow {
+		allocFunction = previous;
 	}
 }
 
@@ -487,13 +454,13 @@ unittest {
 	// asserts on, as `assert(valid(da))` firing three lines further down).
 
 	// Growing from nothing.
-	auto refusing = RefusingAllocator.install();
+	auto previous = beginRationedAllocator();
 	int* fresh = null;
 	assert(growToSize(fresh, 4) is null);
 	assert(fresh is null);     // And nothing was half-built.
 	assert(create!int(4) is null);
 	assert(!pushBack(fresh, 1));
-	refusing.uninstall();
+	endRationedAllocator(previous);
 
 	// Growing something that already exists: the old array has to survive.
 	int* existing = null;
@@ -507,7 +474,7 @@ unittest {
 	immutable filled = length(existing);
 	int* before = existing;
 
-	refusing = RefusingAllocator.install();
+	previous = beginRationedAllocator();
 	// Big enough that it cannot come out of the spare capacity pushBack left.
 	assert(reserve(existing, 4096) is null);
 	assert(!pushBack(existing, 33));
@@ -517,7 +484,7 @@ unittest {
 	assert(!insert(existing, 0, 66));
 	assert(!pushFront(existing, 77));
 	assert(clone(existing) is null);
-	refusing.uninstall();
+	endRationedAllocator(previous);
 
 	// Untouched: same allocation, same contents, same length.
 	assert(existing is before);
@@ -533,9 +500,9 @@ unittest {
 	assert(pushBack(array, 2));
 	scope(exit) free(array);
 
-	auto refusing = RefusingAllocator.install();
+	auto previous = beginRationedAllocator();
 	assert(!swap(array, 0, 1));
-	refusing.uninstall();
+	endRationedAllocator(previous);
 
 	assert(array[0] == 1 && array[1] == 2); // Refused, not half-swapped.
 	assert(swap(array, 0, 1));
