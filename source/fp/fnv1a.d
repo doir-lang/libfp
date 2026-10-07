@@ -7,6 +7,10 @@
 /// ---
 module fp.fnv1a;
 
+
+@nogc nothrow:
+
+
 /// The 64-bit FNV-1a hash of `data`, truncated to `size_t`. Bytes are mixed in from last to first, so results differ from reference FNV-1a values.
 ///
 /// Examples:
@@ -15,7 +19,7 @@ module fp.fnv1a;
 /// ubyte[2] b = [2, 1];
 /// assert(hash(a[]) != hash(b[]));
 /// ---
-size_t hash(inout(ubyte)[] data) @nogc nothrow @trusted {
+size_t hash(inout(ubyte)[] data) @trusted {
 	enum ulong offsetBasis = 14695981039346656037UL;
 	enum ulong prime = 1099511628211UL;
 
@@ -34,7 +38,7 @@ size_t hash(inout(ubyte)[] data) @nogc nothrow @trusted {
 /// int[2] values = [1, 2];
 /// assert(hash(values[]) == hash(cast(ubyte[]) values[]));
 /// ---
-size_t hash(T)(inout(T)[] data) @nogc nothrow @trusted {
+size_t hash(T)(inout(T)[] data) @trusted {
 	return hash(cast(inout(ubyte)[]) data);
 }
 
@@ -47,6 +51,9 @@ unittest {
 	assert(hash(a[]) == hash(b[]));
 	assert(hash(a[]) != hash(c[]));
 
+	// The 64-bit hash, truncated to the host's pointer size.
 	int[2] ints = [1, 2];
-	assert(hash(ints[]) == -8112618052245560500);
+	static if (size_t.sizeof == 8) assert(hash(ints[]) == 0x8F6A30DD2D7B634C);
+	else static if (size_t.sizeof == 4) assert(hash(ints[]) == 0x2D7B634C);
+	else static assert(0, "fp.fnv1a: no test value for a " ~ size_t.sizeof.stringof ~ "-byte size_t");
 }

@@ -30,6 +30,8 @@ version(DigitalMars) {
 ///   $(LI `p !is null && size > 0`: reallocate, preserving existing data.)
 ///   $(LI `size == 0`: free `p` (if non-null) and return `null`.)
 /// )
+///
+/// The memory it returns must be aligned to `maxAlignment`, as `malloc`'s is.
 alias AllocFunction = void* function(void* p, size_t size) @nogc nothrow;
 
 /// The allocator every libfp container uses. Reassign it to plug in your own, and restore the previous one when done.
@@ -82,6 +84,33 @@ struct Header {
 	size_t size; /// The number of elements (not bytes).
 }
 
+/// The alignment of every heap fat pointer's first element, and so the largest `T.alignof` a libfp container accepts: `2 * size_t.sizeof`, which C's `malloc` guarantees.
+///
+/// Examples:
+/// ---
+/// int* p = malloc!int(1);
+/// scope(exit) free(p);
+/// assert(cast(size_t) p % maxAlignment == 0);
+/// ---
+enum size_t maxAlignment = 2 * size_t.sizeof;
+
+/// The padding that, put in front of a header of `bytes` bytes, makes it a whole number of `maxAlignment`s, so the elements just after it are aligned. Every header goes at the front, so the fields that end it stay adjacent to the elements.
+///
+/// Examples:
+/// ---
+/// static assert((headerPadding!12 + 12) % maxAlignment == 0);
+/// static assert(headerPadding!(2 * maxAlignment) == 0);
+/// ---
+package enum size_t headerPadding(size_t bytes) = (maxAlignment - bytes % maxAlignment) % maxAlignment;
+
+/// The bytes from the start of a heap or `alloca` fat pointer's memory to its first element: the `Header`, after the padding that aligns the elements.
+///
+/// Examples:
+/// ---
+/// static assert(prefixBytes >= Header.sizeof && prefixBytes % maxAlignment == 0);
+/// ---
+enum size_t prefixBytes = headerPadding!(Header.sizeof) + Header.sizeof;
+
 /// Returned by every search in libfp when nothing matched.
 enum size_t notFound = size_t.max;
 
@@ -101,8 +130,64 @@ enum size_t allocationRefused = notFound - 1;
 /// assert(headerOf(p).type == PointerType.heap);
 /// ---
 pragma(inline, true)
-package inout(Header)* headerOf(inout(void)* p) @trusted {
+package inout(Header)* headerOf(inout void* p) @trusted {
 	return cast(inout(Header)*)(cast(const(ubyte)*) p - Header.sizeof);
+}
+
+private template nullHeader(H) {
+	__gshared H nullHeader;
+}
+
+/// The container header of type `H` in front of fat pointer `p`, for the containers that extend `Header` with one of their own. For null it returns a zeroed shared dummy, so every query on a null container reads as empty rather than faulting; writes to the dummy are discarded by the next call.
+///
+/// Examples:
+/// ---
+/// static struct Extended { size_t capacity; Header base; }
+/// assert(containerHeaderOf!Extended(null).capacity == 0);
+/// ---
+package H* containerHeaderOf(H)(inout void* p) @trusted {
+	if (p is null) {
+		nullHeader!H = H.init;
+		return &nullHeader!H;
+	}
+	return cast(H*)(cast(const(ubyte)*) p - H.sizeof);
+}
+
+/// Allocates `payloadBytes` bytes of elements behind a container header of type `H`, which ends in a `Header`. The header is reset to `H.init` and tagged `type`, with no elements, and a terminator follows the payload. Returns the first element, or null if the allocator refused or the total would overflow.
+///
+/// Examples:
+/// ---
+/// static struct Extended { ubyte[headerPadding!(size_t.sizeof + Header.sizeof)] padding; size_t capacity; Header base; }
+/// int* p = cast(int*) allocContainer!Extended(4 * int.sizeof, PointerType.dynarray);
+/// assert(p !is null);
+/// scope(exit) cast(void)allocFunction(containerHeaderOf!Extended(p), 0);
+/// assert(pointerType(p) == PointerType.dynarray && containerHeaderOf!Extended(p).capacity == 0);
+/// ---
+package void* allocContainer(H)(size_t payloadBytes, PointerType type) @trusted {
+	static assert(H.sizeof % maxAlignment == 0, "fp.pointer: " ~ H.stringof ~ " must be padded to a multiple of maxAlignment");
+	bool overflow = false;
+	immutable total = core.checkedint.addu(core.checkedint.addu(H.sizeof, payloadBytes, overflow), 1, overflow);
+	if (overflow) return null;
+	ubyte* raw = cast(ubyte*) allocFunction(null, total);
+	if (raw is null) return null;
+
+	*cast(H*) raw = H.init;
+	ubyte* data = raw + H.sizeof;
+	headerOf(data).type = type;
+	data[payloadBytes] = 0;
+	return data;
+}
+
+/// Rejects, at compile time, an element type `T` whose alignment exceeds `maxAlignment`, which only `Array` can hold.
+///
+/// Examples:
+/// ---
+/// mixin requireAlignable!long;
+/// ---
+mixin template requireAlignable(T) {
+	// The mixin site need not have `fp` in scope.
+	static import fp.pointer;
+	static assert(T.alignof <= fp.pointer.maxAlignment, "fp.pointer: " ~ T.stringof ~ " needs more alignment than maxAlignment; only fp.pointer.Array accepts it");
 }
 
 /// Allocates, reallocates (when `p` is non-null) or, when `size` is 0, frees a heap fat pointer of `size` bytes, recording `size` in its header. Returns null if the allocator refused or the total with the header would overflow, leaving `p` untouched.
@@ -115,19 +200,20 @@ package inout(Header)* headerOf(inout(void)* p) @trusted {
 /// ---
 package void* rawAlloc(void* p, size_t size) @trusted {
 	if (p is null && size == 0) return null;
+	assert(p is null || headerOf(p).type == PointerType.heap, "fp.pointer: not a heap fat pointer; free each kind through its own module");
 	if (size == 0) {
-		cast(void)allocFunction(headerOf(p), 0);
+		cast(void)allocFunction(cast(ubyte*) p - prefixBytes, 0);
 		return null;
 	}
 
-	void* base = p is null ? null : cast(void*) headerOf(p);
+	void* base = p is null ? null : cast(ubyte*) p - prefixBytes;
 	bool overflow = false;
-	immutable total = core.checkedint.addu(core.checkedint.addu(Header.sizeof, size, overflow), 1, overflow);
+	immutable total = core.checkedint.addu(core.checkedint.addu(prefixBytes, size, overflow), 1, overflow);
 	if (overflow) return null;
 	ubyte* raw = cast(ubyte*) allocFunction(base, total);
 	if (raw is null) return null;
 
-	ubyte* data = raw + Header.sizeof;
+	ubyte* data = raw + prefixBytes;
 	Header* h = headerOf(data);
 	h.type = PointerType.heap;
 	h.size = size;
@@ -154,7 +240,7 @@ package void* rawRealloc(void* p, size_t elemSize, size_t count) @trusted {
 }
 
 
-/// Allocates a heap fat pointer to `n` uninitialized `T`s, or returns null if the allocator refused or their byte count would overflow.
+/// Allocates a heap fat pointer to `n` uninitialized `T`s, or returns null if `n` is 0, the allocator refused, or their byte count would overflow.
 ///
 /// Examples:
 /// ---
@@ -164,10 +250,11 @@ package void* rawRealloc(void* p, size_t elemSize, size_t count) @trusted {
 /// assert(heapAllocated(p));
 /// ---
 T* malloc(T)(size_t n) {
+	mixin requireAlignable!T;
 	return cast(T*) rawRealloc(null, T.sizeof, n);
 }
 
-/// Resizes heap fat pointer `p` (or allocates one, if `p` is null) to `n` elements, preserving the existing ones. Returns null if the allocator refused or their byte count would overflow, in which case `p` is still valid.
+/// Resizes heap fat pointer `p` (or allocates one, if `p` is null) to `n` elements, preserving the existing ones. Returns null if the allocator refused or their byte count would overflow, in which case `p` is still valid. An `n` of 0 instead frees `p`, also returning null, so `p` must not be used or freed again.
 ///
 /// Examples:
 /// ---
@@ -181,10 +268,11 @@ T* malloc(T)(size_t n) {
 /// assert(p[1] == 7);
 /// ---
 T* realloc(T)(T* p, size_t n) {
+	mixin requireAlignable!T;
 	return cast(T*) rawRealloc(cast(void*) p, T.sizeof, n);
 }
 
-/// Frees heap fat pointer `p`. The `ref` overload also sets `p` to null.
+/// Frees heap fat pointer `p`, which may be null but must not be another kind of fat pointer. The `ref` overload also sets `p` to null.
 ///
 /// Examples:
 /// ---
@@ -203,7 +291,7 @@ void free(T)(const T* p) {
 }
 
 
-/// A fat pointer to `N` elements in automatic (stack) storage, with its header and terminator alongside. It converts to `T*` implicitly.
+/// A fat pointer to `N` elements in automatic (stack) storage, with its header and terminator alongside. It converts to `T*` implicitly. Unlike the heap containers, it accepts any `T.alignof`.
 ///
 /// Examples:
 /// ---
@@ -213,6 +301,7 @@ void free(T)(const T* p) {
 /// assert(stackAllocated(arr));
 /// ---
 struct Array(T, size_t N) {
+	private ubyte[(T.alignof - Header.sizeof % T.alignof) % T.alignof] padding;
 	private Header header = Header(PointerType.stack, N);
 	private T[N] storage;
 	private ubyte terminator = 0;
@@ -236,8 +325,8 @@ struct Array(T, size_t N) {
 ///
 /// Examples:
 /// ---
-/// ubyte[Header.sizeof + 3 * int.sizeof + 1] buffer;
-/// int* p = initStackHeader(cast(int*)(buffer.ptr + Header.sizeof), 3);
+/// align(maxAlignment) ubyte[prefixBytes + 3 * int.sizeof + 1] buffer;
+/// int* p = initStackHeader(cast(int*)(buffer.ptr + prefixBytes), 3);
 /// assert(length(p) == 3 && stackAllocated(p));
 /// ---
 T* initStackHeader(T)(T* data, size_t count) @trusted {
@@ -268,10 +357,11 @@ mixin template alloca(T, string name, string countExpr) {
 	// The body resolves names where it is mixed in, which need not have `fp` in scope.
 	static import core.stdc.stdlib;
 	static import fp.pointer;
+	mixin fp.pointer.requireAlignable!T;
 	mixin(
 		"auto __" ~ name ~ "_count = cast(size_t)(" ~ countExpr ~ ");"
-		~ "ubyte* __" ~ name ~ "_raw = cast(ubyte*) core.stdc.stdlib.alloca(" ~ "fp.pointer.Header.sizeof + " ~ T.stringof ~ ".sizeof * __" ~ name ~ "_count + 1);"
-		~ T.stringof ~ "* " ~ name ~ " = fp.pointer.initStackHeader(cast(" ~ T.stringof ~ "*)(__" ~ name ~ "_raw + fp.pointer.Header.sizeof), __" ~ name ~ "_count);"
+		~ "ubyte* __" ~ name ~ "_raw = cast(ubyte*) core.stdc.stdlib.alloca(fp.pointer.prefixBytes + T.sizeof * __" ~ name ~ "_count + 1);"
+		~ "T* " ~ name ~ " = fp.pointer.initStackHeader(cast(T*)(__" ~ name ~ "_raw + fp.pointer.prefixBytes), __" ~ name ~ "_count);"
 	);
 }
 
@@ -454,4 +544,30 @@ unittest {
 	dynamic[10] = 6;
 	assert(valid(dynamic) && stackAllocated(dynamic) && !heapAllocated(dynamic));
 	assert(length(dynamic) == 20 && dynamic[10] == 6 && fp == 0);
+
+	// A struct, and a type the mixin site names only through a qualified import, which its `.stringof` would lose.
+	static struct Pair { int a, b; }
+	mixin alloca!(Pair, "pairs", "2");
+	pairs[1] = Pair(3, 4);
+	assert(length(pairs) == 2 && pairs[1].b == 4);
+	static import core.stdc.stdio;
+	mixin alloca!(core.stdc.stdio.fpos_t, "positions", "3");
+	assert(length(positions) == 3 && stackAllocated(positions));
+
+	// Elements as aligned as `maxAlignment` allows, wherever they live; `Array` takes any alignment.
+	static struct Wide { align(maxAlignment) ubyte b; }
+	static struct Wider { align(4 * maxAlignment) ubyte b; }
+	Wide* heap = malloc!Wide(3);
+	assert(heap !is null);
+	scope(exit) free(heap);
+	Wide* moved = realloc(heap, 300);
+	assert(moved !is null);
+	heap = moved;
+	mixin alloca!(Wide, "wides", "3");
+	Array!(Wide, 3) wideArray;
+	Array!(Wider, 3) widerArray;
+	assert(cast(size_t) heap % Wide.alignof == 0 && cast(size_t) wides % Wide.alignof == 0);
+	assert(cast(size_t) wideArray.ptr % Wide.alignof == 0 && cast(size_t) widerArray.ptr % Wider.alignof == 0);
+	assert(length(heap) == 300 && length(wides) == 3 && length(widerArray) == 3);
+	static assert(!__traits(compiles, malloc!Wider(1)));
 }

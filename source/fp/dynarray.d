@@ -19,15 +19,16 @@ static import fp.pointer;
 public import fp.pointer : length, size, empty, front, back, slice; // As aliases that can be applied to dynarrays
 
 
-/// A dynarray's header: its capacity in front of the `fp.pointer.Header` every fat pointer has.
+/// A dynarray's header: its capacity in front of the `fp.pointer.Header` every fat pointer has, after the padding that aligns the elements.
 package struct Header {
+	private ubyte[fp.pointer.headerPadding!(size_t.sizeof + fp.pointer.Header.sizeof)] padding;
 	size_t capacity; /// Elements storable without reallocating.
 	fp.pointer.Header base; /// The fat pointer header, with the length.
+
+	static assert(base.offsetof == capacity.offsetof + size_t.sizeof, "fp.dynarray: fp.pointer.valid reads the capacity just before the base header");
 }
 
 private enum size_t defaultSizeBytes = 16;
-
-private __gshared Header nullHeaderRef;
 
 
 @nogc nothrow:
@@ -43,28 +44,8 @@ private __gshared Header nullHeaderRef;
 /// scope(exit) free(arr);
 /// assert(headerOf(arr).capacity == 4);
 /// ---
-package Header* headerOf(inout void* p) @trusted {
-	if (p is null) {
-		nullHeaderRef = Header.init;
-		return &nullHeaderRef;
-	}
-	return cast(Header*)(cast(const(ubyte)*) p - Header.sizeof);
-}
-
-private void* rawAlloc(size_t payloadBytes) @trusted {
-	bool overflow = false;
-	immutable total = core.checkedint.addu(core.checkedint.addu(Header.sizeof, payloadBytes, overflow), 1, overflow);
-	if (overflow) return null;
-	ubyte* raw = cast(ubyte*) fp.pointer.allocFunction(null, total);
-	if (raw is null) return null;
-
-	ubyte* data = raw + Header.sizeof;
-	Header* h = headerOf(data);
-	h.capacity = 0;
-	h.base.type = fp.pointer.PointerType.dynarray;
-	h.base.size = 0;
-	data[payloadBytes] = 0;
-	return data;
+package Header* headerOf(inout void* p) {
+	return fp.pointer.containerHeaderOf!Header(p);
 }
 
 
@@ -78,7 +59,7 @@ private void* rawAlloc(size_t payloadBytes) @trusted {
 /// scope(exit) free(arr);
 /// assert(validDynarray(arr));
 /// ---
-bool validDynarray(inout void* p) {
+bool validDynarray(inout void* p) @trusted {
 	return headerOf(p).base.type == fp.pointer.PointerType.dynarray;
 }
 
@@ -95,9 +76,23 @@ alias valid = validDynarray;
 /// scope(exit) free(arr);
 /// assert(capacity(arr) == 8 && length(arr) == 0);
 /// ---
-size_t capacity(inout void* p) {
+size_t capacity(inout void* p) @trusted {
 	if (!valid(p)) return 0;
 	return headerOf(p).capacity;
+}
+
+/// Whether the non-empty slice `view` starts inside the elements of fat pointer `da`, which may be null. Functions that grow or shift `da` use it to find such a view again afterwards.
+///
+/// Examples:
+/// ---
+/// int* arr = create!int(4);
+/// scope(exit) free(arr);
+/// assert(overlaps(arr, slice(arr)[1 .. 3]));
+/// int[2] other;
+/// assert(!overlaps(arr, other[]));
+/// ---
+package bool overlaps(T)(const T* da, const(T)[] view) @trusted {
+	return view.length != 0 && da !is null && view.ptr >= da && view.ptr < da + length(da);
 }
 
 
@@ -120,6 +115,7 @@ private size_t upperPowerOfTwo(size_t v) pure {
 /// assert(length(arr) == 3 && capacity(arr) == 4);
 /// ---
 package T* maybeGrow(T)(ref T* da, size_t newSize, bool updateUtilized, bool exactSizing) @trusted {
+	mixin fp.pointer.requireAlignable!T;
 	if (da !is null) {
 		assert(valid(da));
 		Header* h = headerOf(da);
@@ -141,7 +137,7 @@ package T* maybeGrow(T)(ref T* da, size_t newSize, bool updateUtilized, bool exa
 	if (overflow) return null;
 
 	immutable oldSize = headerOf(da).base.size; // the zeroed dummy's for null
-	T* newData = cast(T*) rawAlloc(bytes);
+	T* newData = cast(T*) fp.pointer.allocContainer!Header(bytes, fp.pointer.PointerType.dynarray);
 	if (newData is null) return null;
 	Header* newH = headerOf(newData);
 	newH.capacity = newCapacity;
@@ -272,7 +268,7 @@ bool pushFront(T)(ref T* da, T value) {
 	return insert(da, 0, value);
 }
 
-/// Appends a copy of every element of `src`. Returns false if the array could not grow, leaving it unchanged.
+/// Appends a copy of every element of `src`, which may view `dest` itself. Returns false if the array could not grow or its length would overflow, leaving it unchanged.
 ///
 /// Examples:
 /// ---
@@ -288,8 +284,13 @@ bool pushFront(T)(ref T* da, T value) {
 /// ---
 bool concatenate(T)(ref T* dest, inout(T)[] src) @trusted {
 	immutable preSize = length(dest);
-	if (maybeGrow(dest, preSize + src.length, true, false) is null) return false;
-	core.stdc.string.memcpy(dest + preSize, src.ptr, src.length * T.sizeof);
+	bool overflow = false;
+	immutable newSize = core.checkedint.addu(preSize, src.length, overflow);
+	// Growing frees the old block, so a `src` viewing `dest` is found again by its offset.
+	immutable ptrdiff_t selfOffset = overlaps(dest, src) ? src.ptr - dest : -1;
+	if (overflow || maybeGrow(dest, newSize, true, false) is null) return false;
+	const(T)* from = selfOffset >= 0 ? dest + selfOffset : src.ptr;
+	core.stdc.string.memcpy(dest + preSize, from, src.length * T.sizeof);
 	return true;
 }
 /// Ditto
@@ -312,7 +313,7 @@ T* create(T)(size_t size) {
 	return da;
 }
 
-/// Copies `src`'s elements into `dest`, with `src`'s capacity unless `shrink` is set. Returns false if `dest` could not be sized to hold them, leaving it unchanged.
+/// Copies `src`'s elements into `dest`, with at least `src`'s capacity unless `shrink` is set or `src` is a fat pointer other than a dynarray. Returns false if `dest` could not be sized to hold them, leaving it unchanged.
 ///
 /// Examples:
 /// ---
@@ -327,12 +328,12 @@ T* create(T)(size_t size) {
 /// assert(length(dest) == 1 && capacity(dest) == 10);
 /// ---
 bool cloneTo(T)(ref T* dest, inout T* src, bool shrink = false) @trusted {
-	immutable newCapacity = shrink ? length(src) : capacity(src);
+	immutable srcLength = length(src);
+	// Only a dynarray has a capacity; any other fat pointer reports 0.
+	immutable newCapacity = shrink || capacity(src) < srcLength ? srcLength : capacity(src);
 	if (growToSize(dest, newCapacity) is null) return false;
-	core.stdc.string.memcpy(dest, src, length(src) * T.sizeof);
-	Header* h = headerOf(dest);
-	h.capacity = newCapacity;
-	h.base.size = length(src);
+	core.stdc.string.memcpy(dest, src, srcLength * T.sizeof);
+	headerOf(dest).base.size = srcLength;
 	return true;
 }
 
@@ -355,7 +356,7 @@ T* clone(T)(inout T* src) {
 	return result;
 }
 
-/// Frees dynarray `da`, which may be null. The `ref` overload also sets `da` to null.
+/// Frees dynarray `da`, which may be null but must not be another kind of fat pointer. The `ref` overload also sets `da` to null.
 ///
 /// Examples:
 /// ---
@@ -370,7 +371,9 @@ void free(T)(ref T* da) @trusted {
 }
 /// Ditto
 void free(T)(const T* da) @trusted {
-	if (da !is null) cast(void)fp.pointer.allocFunction(headerOf(da), 0);
+	if (da is null) return;
+	assert(valid(da));
+	cast(void)fp.pointer.allocFunction(headerOf(da), 0);
 }
 
 
@@ -404,7 +407,7 @@ T* popBack(T)(T* da) {
 	return popBackCount(da, 1);
 }
 
-/// Removes `count` elements starting at `start`, moving every later element down. With `matchCapacity`, it also reallocates so capacity equals the new length. Returns a pointer to element `start`, or null if that reallocation was refused, in which case the array is unchanged.
+/// Removes `count` elements starting at `start`, moving every later element down. With `matchCapacity`, it also reallocates so capacity equals the new length, or 1 if that is 0, since a zero-capacity empty dynarray is not `fp.pointer.valid`. Returns a pointer to element `start`, or null if that reallocation was refused, in which case the array is unchanged.
 ///
 /// Examples:
 /// ---
@@ -428,8 +431,6 @@ T* deleteRange(T)(ref T* da, size_t start, size_t count, bool matchCapacity = fa
 		immutable newLength = oldSize - count;
 		T* newData = null;
 		if (growToSize(newData, newLength) is null) return null;
-		Header* newH = headerOf(newData);
-		newH.capacity = newLength;
 
 		ubyte* newRaw = cast(ubyte*) newData;
 		ubyte* insertedStart = newRaw + start * T.sizeof;
@@ -477,7 +478,7 @@ void clear(T)(T* da) @trusted {
 	headerOf(da).base.size = 0;
 }
 
-/// Reallocates so capacity equals length. Returns null if the allocator refused, in which case the array is unchanged.
+/// Reallocates so capacity equals length, or 1 for an empty array. Returns null if the allocator refused, in which case the array is unchanged.
 ///
 /// Examples:
 /// ---
@@ -507,6 +508,7 @@ bool swapRange(T)(T* da, size_t start1, size_t start2, size_t count) @trusted {
 	assert(count <= length(da) && start1 <= length(da) - count);
 	assert(start2 <= length(da) - count);
 	if (start1 == start2 || count == 0) return true;
+	assert(start1 + count <= start2 || start2 + count <= start1);
 
 	immutable bytes = count * T.sizeof;
 	ubyte* scratch = cast(ubyte*) fp.pointer.allocFunction(null, bytes);
@@ -571,6 +573,47 @@ version(unittest) {
 	package void endRationedAllocator(fp.pointer.AllocFunction previous) {
 		fp.pointer.allocFunction = previous;
 	}
+
+	private __gshared fp.pointer.AllocFunction poisonUnderlying;
+
+	private void* poisoningAlloc(void* p, size_t size) @trusted {
+		enum prefix = fp.pointer.maxAlignment; // holds the size and keeps the memory aligned
+		if (size == 0) {
+			if (p !is null) {
+				size_t* block = cast(size_t*)(cast(ubyte*) p - prefix);
+				core.stdc.string.memset(p, 0xAA, *block);
+				cast(void)poisonUnderlying(block, 0);
+			}
+			return null;
+		}
+		// Dynarrays grow by allocating, copying and freeing, so nothing under test reallocates in place.
+		assert(p is null);
+		size_t* fresh = cast(size_t*) poisonUnderlying(null, size + prefix);
+		if (fresh is null) return null;
+		*fresh = size;
+		return cast(ubyte*) fresh + prefix;
+	}
+
+	/// For tests of reads through stale pointers: `beginPoisoningAllocator` makes `fp.pointer.allocFunction` overwrite each block as it is freed, so such a read sees garbage rather than the old contents; `endPoisoningAllocator` restores the allocator it returned. Memory allocated while it is active must be freed while it is, so register the restoring `scope(exit)` first.
+	///
+	/// Examples:
+	/// ---
+	/// auto previous = beginPoisoningAllocator();
+	/// scope(exit) endPoisoningAllocator(previous);
+	/// int* arr = create!int(1);
+	/// scope(exit) free(arr);
+	/// assert(arr !is null);
+	/// ---
+	package fp.pointer.AllocFunction beginPoisoningAllocator() {
+		poisonUnderlying = fp.pointer.allocFunction;
+		fp.pointer.allocFunction = &poisoningAlloc;
+		return poisonUnderlying;
+	}
+
+	/// Ditto
+	package void endPoisoningAllocator(fp.pointer.AllocFunction previous) {
+		fp.pointer.allocFunction = previous;
+	}
 }
 
 
@@ -591,7 +634,7 @@ unittest {
 	scope(exit) free(arr);
 
 	assert(reserve(arr, 20) !is null);
-	assert(capacity(arr) == 20); // NOTE: dynarrays aren't "valid" until they have had at least one element added!
+	assert(capacity(arr) == 20);
 	assert(length(arr) == 0);
 
 	assert(pushBack(arr, 5));
@@ -630,11 +673,20 @@ unittest {
 
 	int* none = null;
 	assert(shrinkToFit(none) !is null);
-	assert(length(none) == 0 && capacity(none) == 0);
+	assert(length(none) == 0 && capacity(none) == 1);
 	free(none);
 
 	clear(arr);
 	assert(length(arr) == 0 && capacity(arr) == 3);
+
+	// An emptied array keeps a capacity, which is what makes it `fp.pointer.valid` with no elements.
+	int* emptied = create!int(3);
+	assert(emptied !is null);
+	scope(exit) free(emptied);
+	assert(cloneTo(emptied, arr, true));
+	assert(fp.pointer.valid(emptied) && length(emptied) == 0 && capacity(emptied) == 3);
+	assert(shrinkToFit(arr) !is null);
+	assert(fp.pointer.valid(arr) && length(arr) == 0 && capacity(arr) == 1);
 
 	// Only `src`'s two elements are copied: reading more would overrun `src` and overwrite `dest`'s spare slots.
 	int* dest = create!int(8);
@@ -651,6 +703,35 @@ unittest {
 
 	// A `const(int)*` lvalue would still bind to `ref T*`, with `T` deduced as `const(int)`, so only an rvalue reaches the by-value overload.
 	free(cast(const int*) src);
+
+	// A heap fat pointer has no capacity to copy, so its length sizes the clone.
+	int* heap = fp.pointer.malloc!int(10);
+	assert(heap !is null);
+	scope(exit) fp.pointer.free(heap);
+	heap[0 .. 10] = 4;
+	int* fromHeap = null;
+	scope(exit) free(fromHeap);
+	assert(cloneTo(fromHeap, heap));
+	assert(length(fromHeap) == 10 && capacity(fromHeap) == 10 && fromHeap[9] == 4);
+
+	// Appending an array to itself must read it from where growing moved it, not the freed block.
+	auto previous = beginPoisoningAllocator();
+	scope(exit) endPoisoningAllocator(previous);
+	int* doubled = create!int(4);
+	assert(doubled !is null);
+	scope(exit) free(doubled);
+	foreach (i; 0 .. 4)
+		doubled[i] = i;
+	assert(concatenate(doubled, doubled));
+	assert(concatenate(doubled, slice(doubled)[1 .. 3]));
+	assert(slice(doubled) == [0, 1, 2, 3, 0, 1, 2, 3, 1, 2]);
+
+	static struct Wide { align(fp.pointer.maxAlignment) ubyte b; }
+	Wide* wides = null;
+	scope(exit) free(wides);
+	foreach (i; 0 .. 20)
+		assert(pushBack(wides, Wide(cast(ubyte) i)));
+	assert(cast(size_t) wides % Wide.alignof == 0 && wides[19].b == 19);
 }
 
 unittest {

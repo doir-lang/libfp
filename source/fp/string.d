@@ -55,8 +55,6 @@ auto slice(S)(S str) @trusted if (isStringLike!S) {
 	}
 }
 
-/// Ditto
-alias stringSlice = slice;
 
 /// The number of characters (bytes) in `str`, excluding the terminator.
 ///
@@ -74,9 +72,6 @@ size_t length(inout char* str) @trusted {
 /// Ditto
 alias size = length;
 
-private bool overlaps(const char* str, const(char)[] view) @trusted {
-	return view.length != 0 && str !is null && view.ptr >= str && view.ptr < str + length(str);
-}
 
 
 /// A new fp string holding a copy of `str`; null if the copy is empty (null is the empty string) or could not be allocated.
@@ -102,7 +97,7 @@ char* makeDynamic(S)(S str) @trusted if (isStringLike!S) {
 /// Ditto
 alias clone = makeDynamic;
 
-/// Frees `str`, which may be an fp string, a plain heap fat pointer, or memory straight from `allocFunction`; each is released by its own layer. A stack fat pointer (from `fp.pointer.Array` or `fp.pointer.alloca`) belongs to its frame and is left alone. The `ref` overload also sets `str` to null.
+/// Frees `str`, which may be an fp string, a plain heap fat pointer, or memory straight from `allocFunction`; each is released by its own layer. A stack fat pointer (from `fp.pointer.Array` or `fp.pointer.alloca`) belongs to its frame and is left alone. A hash table is rejected and left untouched, since only `fp.hashtable.free` can release it. The `ref` overload also sets `str` to null, unless it was rejected.
 ///
 /// Examples:
 /// ---
@@ -111,12 +106,15 @@ alias clone = makeDynamic;
 /// assert(s is null);
 /// ---
 void free(ref char* str) @trusted {
+	// Nulling a rejected table would lose the caller's only handle to it.
+	if (fp.pointer.pointerType(str) == fp.pointer.PointerType.hashTable) return;
 	free(cast(const char*) str);
 	str = null;
 }
 /// Ditto
 void free(const char* str) @trusted {
-	if (fp.pointer.stackAllocated(str)) return;
+	immutable type = fp.pointer.pointerType(str);
+	if (type == fp.pointer.PointerType.stack || type == fp.pointer.PointerType.hashTable) return;
 	if (fp.dynarray.valid(str)) fp.dynarray.free(str);
 	else if (fp.pointer.valid(str) && fp.pointer.heapAllocated(str)) fp.pointer.free(str);
 	else cast(void)fp.pointer.allocFunction(cast(void*) str, 0);
@@ -138,7 +136,7 @@ private extern (C) char* formatC(const char* fmt, ...) @trusted {
 	va_start(argsSize, fmt);
 	immutable size = vsnprintf(null, 0, fmt, argsSize);
 	va_end(argsSize);
-	if (size < 0) return null;
+	if (size <= 0) return null;
 
 	char* out_ = null;
 	if (fp.dynarray.growToSize(out_, size) is null) return null;
@@ -150,7 +148,7 @@ private extern (C) char* formatC(const char* fmt, ...) @trusted {
 	return out_;
 }
 
-/// A new fp string formatted by `vsnprintf`. A slice argument may stand where `%s` expects a string: it is passed as a null-terminated copy, since C varargs cannot carry a D slice. Returns null if `vsnprintf` rejected the format or an allocation, of a copy or of the result, was refused.
+/// A new fp string formatted by `vsnprintf`. A slice argument may stand where `%s` expects a string: it is passed as a null-terminated copy, since C varargs cannot carry a D slice. Returns null if the result is empty (null is the empty string), `vsnprintf` rejected the format, or an allocation, of a copy or of the result, was refused.
 ///
 /// Examples:
 /// ---
@@ -307,11 +305,7 @@ const(char)[]* split(S, D)(S str, D delimiter) @trusted if (isStringLike!S && is
 /// assert(equal(s, "hi"));
 /// ---
 char* append(ref char* str, char c) @trusted {
-	assert(fp.pointer.valid(str) || str is null);
-	immutable size = fp.pointer.length(str);
-	if (!fp.dynarray.pushBack(str, c)) return null;
-	str[size + 1] = 0;
-	return str;
+	return concatenate(str, (&c)[0 .. 1]);
 }
 
 /// Appends `b` to `a`, which may be null. Returns `a`, or null if it could not grow (leaving it unchanged) or both are empty.
@@ -327,232 +321,12 @@ char* append(ref char* str, char c) @trusted {
 char* concatenate(S)(ref char* a, S b) @trusted if (isStringLike!S) {
 	assert(fp.pointer.valid(a) || a is null);
 	const(char)[] view = slice(b);
-	immutable sizeA = length(a);
-	immutable sizeB = view.length;
-	if (sizeA + sizeB == 0) return null;
-	immutable ptrdiff_t selfOffset = overlaps(a, view) ? view.ptr - a : -1;
-	// `grow`, not `growToSize`: exact fits reallocate on every append, making n appends cost O(n^2) copying.
-	if (fp.dynarray.grow(a, sizeB) is null) return null;
-	if (selfOffset >= 0) view = a[selfOffset .. selfOffset + sizeB];
-	core.stdc.string.memcpy(a + sizeA, view.ptr, sizeB);
-	// The NUL `rawAlloc` wrote sits at the end of the capacity, which now runs past the string.
-	a[sizeA + sizeB] = 0;
+	if (length(a) + view.length == 0) return null;
+	if (!fp.dynarray.concatenate(a, view)) return null;
+	// The NUL written at allocation sits at the end of the capacity, which may run past the string.
+	a[length(a)] = 0;
 	return a;
 }
-
-// Numbers go through a stack buffer, not `format`, which would heap-allocate for every one appended. Returns false only if an allocation was refused.
-private bool appendPiece(T)(ref char* str, T piece) @trusted {
-	// `is(T : const(char)*)` covers every qualifier `slice` accepts; naming them individually once missed `immutable(char)*`, a literal's `.ptr`.
-	static if (is(T : const(char)[]) || is(T : const(char)*)) {
-		const(char)[] text = slice(piece);
-	} else static if (is(T : real) && !is(T : long) && !is(T : ulong)) {
-		char[64] buffer;
-		immutable n = snprintf(buffer.ptr, buffer.length, "%Lg", cast(real) piece);
-		const(char)[] text = n > 0 ? buffer[0 .. n] : null;
-	} else static if (__traits(isUnsigned, T)) {
-		char[32] buffer;
-		immutable n = snprintf(buffer.ptr, buffer.length, "%llu", cast(ulong) piece);
-		const(char)[] text = n > 0 ? buffer[0 .. n] : null;
-	} else static if (is(T : long)) {
-		char[32] buffer;
-		immutable n = snprintf(buffer.ptr, buffer.length, "%lld", cast(long) piece);
-		const(char)[] text = n > 0 ? buffer[0 .. n] : null;
-	} else static assert(0, "fp.string: cannot concatenate a " ~ T.stringof);
-	// `concatenate` also returns null for an empty result, which is not a failure.
-	return text.length == 0 || concatenate(str, text) !is null;
-}
-
-/// Appends every piece to `str`, which may be null: slices, fp strings, and numbers (written in decimal). Returns `str`, or null if an allocation was refused, leaving `str` as it was.
-///
-/// Examples:
-/// ---
-/// char* s = null;
-/// scope(exit) free(s);
-/// assert(concatenateMultiple(s, "line ", 42, ": ", 1.5) !is null);
-/// assert(equal(s, "line 42: 1.5"));
-/// ---
-char* concatenateMultiple(Args...)(ref char* str, Args pieces) @trusted {
-	immutable wasNull = str is null;
-	immutable before = length(str);
-	static foreach (p; pieces) {
-		if (!appendPiece(str, p)) {
-			if (wasNull) free(str);
-			else {
-				cast(void)fp.dynarray.popBackCount(str, length(str) - before);
-				str[before] = 0;
-			}
-			return null;
-		}
-	}
-	return str;
-}
-
-/// A new fp string concatenating every piece, as `concatenateMultiple` does, or null if the result is empty or an allocation was refused. Free the result with `fp.string.free`.
-///
-/// Examples:
-/// ---
-/// char* s = createFromConcatenation("n=", -7, "!");
-/// scope(exit) free(s);
-/// assert(equal(s, "n=-7!"));
-/// ---
-char* createFromConcatenation(Args...)(Args pieces) {
-	char* out_ = null;
-	return concatenateMultiple(out_, pieces);
-}
-
-
-/// Repeats fp string `str` so it holds `times` copies of itself. A `times` of 0 frees it, leaving null. Returns `str`, or null if an allocation was refused or the length would overflow, leaving `str` unchanged.
-///
-/// Examples:
-/// ---
-/// char* s = makeDynamic("ab");
-/// scope(exit) free(s);
-/// assert(replicate(s, 3) !is null);
-/// assert(equal(s, "ababab"));
-/// ---
-char* replicate(ref char* str, size_t times) @trusted {
-	if (times == 0) {
-		free(str);
-		return str;
-	}
-
-	assert(fp.pointer.valid(str));
-	char* one = makeDynamic(str);
-	scope(exit) free(one);
-	bool overflow = false;
-	immutable newLength = core.checkedint.mulu(length(str), times, overflow);
-	if (one is null || overflow || fp.dynarray.reserve(str, newLength) is null) return null;
-	// The capacity is reserved, so these appends cannot fail.
-	foreach (i; 0 .. times - 1)
-		cast(void)concatenate(str, one);
-	return str;
-}
-
-
-/// Replaces the `rangeLen` characters of fp string `in_` starting at `start` with `with_`. Returns `in_`, or null if an allocation was refused (leaving it unchanged).
-///
-/// Examples:
-/// ---
-/// char* s = makeDynamic("Hello World");
-/// scope(exit) free(s);
-/// assert(replaceRange(s, "Bob", 6, 5) !is null);
-/// assert(equal(s, "Hello Bob"));
-/// ---
-char* replaceRange(S)(ref char* in_, S with_, size_t start, size_t rangeLen) @trusted if (isStringLike!S) {
-	assert(fp.pointer.valid(in_));
-	const(char)[] w = slice(with_);
-	immutable inLen = length(in_);
-	assert(rangeLen <= inLen && start <= inLen - rangeLen);
-	immutable end = start + rangeLen;
-
-	immutable withLen = w.length;
-	// `memmove`, not `memcpy`: `with_` may view `in_` itself.
-	if (rangeLen > withLen) {
-		immutable diff = rangeLen - withLen;
-		core.stdc.string.memmove(in_ + start, w.ptr, withLen);
-		cast(void)fp.dynarray.deleteRange(in_, start + withLen, diff, false);
-	} else if (withLen > rangeLen) {
-		// Growing may free a `with_` that views `in_`, and the shift moves its text, so it is copied first.
-		char* copy = null;
-		scope(exit) free(copy);
-		if (overlaps(in_, w)) {
-			if ((copy = makeDynamic(w)) is null) return null;
-			w = slice(copy);
-		}
-		immutable diff = withLen - rangeLen;
-		if (fp.dynarray.grow(in_, diff) is null) return null;
-		core.stdc.string.memmove(in_ + end + diff, in_ + end, inLen - end);
-		core.stdc.string.memcpy(in_ + start, w.ptr, withLen);
-	} else {
-		core.stdc.string.memmove(in_ + start, w.ptr, withLen);
-	}
-	in_[length(in_)] = 0;
-	return in_;
-}
-
-/// Replaces the first `needle` at or after `start` in fp string `in_` with `replacement`. Returns where it was found, `fp.pointer.notFound`, or `fp.pointer.allocationRefused` if `in_` could not grow (leaving it unchanged).
-///
-/// Examples:
-/// ---
-/// char* s = makeDynamic("a-b-c");
-/// scope(exit) free(s);
-/// assert(replaceFirst(s, "-", "+", 0) == 1);
-/// assert(equal(s, "a+b-c"));
-/// ---
-size_t replaceFirst(N, R)(ref char* in_, N needle, R replacement, size_t start) @trusted if (isStringLike!N && isStringLike!R) {
-	const(char)[] n = slice(needle);
-	start = find(in_, n, start);
-	if (start == fp.pointer.notFound) return start;
-	if (replaceRange(in_, replacement, start, n.length) is null) return fp.pointer.allocationRefused;
-	return start;
-}
-
-/// Replaces every `needle` at or after `start` in fp string `in_` with `replacement`, never rescanning replaced text. Returns `in_`, or null if an allocation was refused, in which case the replacements before that stay made.
-///
-/// Examples:
-/// ---
-/// char* s = makeDynamic("a-b-c");
-/// scope(exit) free(s);
-/// assert(replace(s, "-", "--", 0) !is null);
-/// assert(equal(s, "a--b--c"));
-/// ---
-char* replace(N, R)(ref char* in_, N needle, R replacement, size_t start) @trusted if (isStringLike!N && isStringLike!R) {
-	const(char)[] n = slice(needle);
-	const(char)[] r = slice(replacement);
-	// Every replacement changes `in_`, so arguments viewing it are copied first to keep the text they had.
-	char* needleCopy = null;
-	char* replacementCopy = null;
-	scope(exit) {
-		free(needleCopy);
-		free(replacementCopy);
-	}
-	if (overlaps(in_, n)) {
-		if ((needleCopy = makeDynamic(n)) is null) return null;
-		n = slice(needleCopy);
-	}
-	if (overlaps(in_, r)) {
-		if ((replacementCopy = makeDynamic(r)) is null) return null;
-		r = slice(replacementCopy);
-	}
-	while ((start = replaceFirst(in_, n, r, start)) != fp.pointer.notFound) {
-		if (start == fp.pointer.allocationRefused) return null;
-		start += r.length;
-	}
-	return in_;
-}
-
-
-/// Whether `c` is an ASCII decimal digit.
-///
-/// Examples:
-/// ---
-/// assert(isDigit('7') && !isDigit('a'));
-/// ---
-bool isDigit(char c) { return c >= '0' && c <= '9'; }
-
-/// Whether `c` is an ASCII octal digit.
-///
-/// Examples:
-/// ---
-/// assert(isOctalDigit('7') && !isOctalDigit('8'));
-/// ---
-bool isOctalDigit(char c) { return c >= '0' && c <= '7'; }
-
-/// Whether `c` is an ASCII hexadecimal digit, in either case.
-///
-/// Examples:
-/// ---
-/// assert(isHexDigit('f') && isHexDigit('F') && !isHexDigit('g'));
-/// ---
-bool isHexDigit(char c) { return isDigit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'); }
-
-/// Whether `c` is an ASCII letter.
-///
-/// Examples:
-/// ---
-/// assert(isAsciiAlpha('q') && isAsciiAlpha('Q') && !isAsciiAlpha('1'));
-/// ---
-bool isAsciiAlpha(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
 
 
 /// Why a codepoint could not be encoded as UTF-8, or appended once encoded.
@@ -609,6 +383,245 @@ size_t encodeUtf8(uint codepoint, char* out_) @trusted {
 	return encodeUtf8(codepoint, out_, ignored);
 }
 
+
+// Characters and numbers go through a stack buffer, not `format`, which would heap-allocate for every one appended. Returns false only if an allocation was refused.
+private bool appendPiece(T)(ref char* str, T piece) @trusted {
+	// `is(T : const(char)*)` covers every qualifier `slice` accepts; naming them individually once missed `immutable(char)*`, a literal's `.ptr`.
+	static if (is(T : const(char)[]) || is(T : const(char)*)) {
+		const(char)[] text = slice(piece);
+	} else static if (is(immutable T == immutable char)) {
+		const(char)[] text = (&piece)[0 .. 1];
+	} else static if (is(immutable T == immutable wchar) || is(immutable T == immutable dchar)) {
+		char[4] buffer;
+		size_t n = encodeUtf8(piece, buffer.ptr);
+		if (n == 0) n = encodeUtf8(0xFFFD, buffer.ptr);
+		const(char)[] text = buffer[0 .. n];
+	} else static if (is(T : real) && !is(T : long) && !is(T : ulong)) {
+		char[64] buffer;
+		immutable n = snprintf(buffer.ptr, buffer.length, "%Lg", cast(real) piece);
+		const(char)[] text = n > 0 ? buffer[0 .. n] : null;
+	} else static if (__traits(isUnsigned, T)) {
+		char[32] buffer;
+		immutable n = snprintf(buffer.ptr, buffer.length, "%llu", cast(ulong) piece);
+		const(char)[] text = n > 0 ? buffer[0 .. n] : null;
+	} else static if (is(T : long)) {
+		char[32] buffer;
+		immutable n = snprintf(buffer.ptr, buffer.length, "%lld", cast(long) piece);
+		const(char)[] text = n > 0 ? buffer[0 .. n] : null;
+	} else static assert(0, "fp.string: cannot concatenate a " ~ T.stringof);
+	// `concatenate` also returns null for an empty result, which is not a failure.
+	return text.length == 0 || concatenate(str, text) !is null;
+}
+
+/// Appends every piece to `str`, which may be null: slices, fp strings, characters, and numbers (written in decimal). A `wchar` or `dchar` is encoded as UTF-8, and one that cannot be, such as a lone surrogate, as U+FFFD. A piece may view `str` itself. Returns `str`, or null if an allocation was refused, leaving `str` as it was.
+///
+/// Examples:
+/// ---
+/// char* s = null;
+/// scope(exit) free(s);
+/// assert(concatenateMultiple(s, "line ", 42, ": ", 1.5, '!', '€') !is null);
+/// assert(equal(s, "line 42: 1.5!€"));
+/// ---
+char* concatenateMultiple(Args...)(ref char* str, Args pieces) @trusted {
+	// An earlier piece may move `str`, so pieces viewing it are copied before any is appended.
+	const(char)[][Args.length] views;
+	char*[Args.length] copies;
+	scope(exit) foreach (ref copy; copies) free(copy);
+	static foreach (i, A; Args) static if (isStringLike!A) {
+		views[i] = slice(pieces[i]);
+		if (fp.dynarray.overlaps(str, views[i])) {
+			if ((copies[i] = makeDynamic(views[i])) is null) return null;
+			views[i] = slice(copies[i]);
+		}
+	}
+
+	immutable wasNull = str is null;
+	immutable before = length(str);
+	static foreach (i, A; Args) {{
+		static if (isStringLike!A) immutable appended = appendPiece(str, views[i]);
+		else immutable appended = appendPiece(str, pieces[i]);
+		if (!appended) {
+			if (wasNull) free(str);
+			else {
+				cast(void)fp.dynarray.popBackCount(str, length(str) - before);
+				str[before] = 0;
+			}
+			return null;
+		}
+	}}
+	return str;
+}
+
+/// A new fp string concatenating every piece, as `concatenateMultiple` does, or null if the result is empty or an allocation was refused. Free the result with `fp.string.free`.
+///
+/// Examples:
+/// ---
+/// char* s = createFromConcatenation("n=", -7, "!");
+/// scope(exit) free(s);
+/// assert(equal(s, "n=-7!"));
+/// ---
+char* createFromConcatenation(Args...)(Args pieces) {
+	char* out_ = null;
+	return concatenateMultiple(out_, pieces);
+}
+
+
+/// Repeats fp string `str` so it holds `times` copies of itself. A `times` of 0 frees it, leaving null, and an empty `str` stays as it is. Returns `str`, or null if an allocation was refused or the length would overflow, leaving `str` unchanged.
+///
+/// Examples:
+/// ---
+/// char* s = makeDynamic("ab");
+/// scope(exit) free(s);
+/// assert(replicate(s, 3) !is null);
+/// assert(equal(s, "ababab"));
+/// ---
+char* replicate(ref char* str, size_t times) @trusted {
+	if (times == 0) {
+		free(str);
+		return str;
+	}
+	if (length(str) == 0) return str;
+
+	assert(fp.pointer.valid(str));
+	char* one = makeDynamic(str);
+	scope(exit) free(one);
+	bool overflow = false;
+	immutable newLength = core.checkedint.mulu(length(str), times, overflow);
+	if (one is null || overflow || fp.dynarray.reserve(str, newLength) is null) return null;
+	// The capacity is reserved, so these appends cannot fail.
+	foreach (i; 0 .. times - 1)
+		cast(void)concatenate(str, one);
+	return str;
+}
+
+
+/// Replaces the `rangeLen` characters of fp string `in_` starting at `start` with `with_`. Returns `in_`, or null if an allocation was refused (leaving it unchanged).
+///
+/// Examples:
+/// ---
+/// char* s = makeDynamic("Hello World");
+/// scope(exit) free(s);
+/// assert(replaceRange(s, "Bob", 6, 5) !is null);
+/// assert(equal(s, "Hello Bob"));
+/// ---
+char* replaceRange(S)(ref char* in_, S with_, size_t start, size_t rangeLen) @trusted if (isStringLike!S) {
+	assert(fp.pointer.valid(in_));
+	const(char)[] w = slice(with_);
+	immutable inLen = length(in_);
+	assert(rangeLen <= inLen && start <= inLen - rangeLen);
+	immutable end = start + rangeLen;
+
+	immutable withLen = w.length;
+	// `memmove`, not `memcpy`: `with_` may view `in_` itself.
+	if (rangeLen > withLen) {
+		immutable diff = rangeLen - withLen;
+		core.stdc.string.memmove(in_ + start, w.ptr, withLen);
+		cast(void)fp.dynarray.deleteRange(in_, start + withLen, diff, false);
+	} else if (withLen > rangeLen) {
+		// Growing may free a `with_` that views `in_`, and the shift moves its text, so it is copied first.
+		char* copy = null;
+		scope(exit) free(copy);
+		if (fp.dynarray.overlaps(in_, w)) {
+			if ((copy = makeDynamic(w)) is null) return null;
+			w = slice(copy);
+		}
+		immutable diff = withLen - rangeLen;
+		if (fp.dynarray.grow(in_, diff) is null) return null;
+		core.stdc.string.memmove(in_ + end + diff, in_ + end, inLen - end);
+		core.stdc.string.memcpy(in_ + start, w.ptr, withLen);
+	} else {
+		core.stdc.string.memmove(in_ + start, w.ptr, withLen);
+	}
+	in_[length(in_)] = 0;
+	return in_;
+}
+
+/// Replaces the first `needle` at or after `start` in fp string `in_` with `replacement`. Returns where it was found, `fp.pointer.notFound`, or `fp.pointer.allocationRefused` if `in_` could not grow (leaving it unchanged).
+///
+/// Examples:
+/// ---
+/// char* s = makeDynamic("a-b-c");
+/// scope(exit) free(s);
+/// assert(replaceFirst(s, "-", "+", 0) == 1);
+/// assert(equal(s, "a+b-c"));
+/// ---
+size_t replaceFirst(N, R)(ref char* in_, N needle, R replacement, size_t start) @trusted if (isStringLike!N && isStringLike!R) {
+	const(char)[] n = slice(needle);
+	start = find(in_, n, start);
+	if (start == fp.pointer.notFound) return start;
+	if (replaceRange(in_, replacement, start, n.length) is null) return fp.pointer.allocationRefused;
+	return start;
+}
+
+/// Replaces every `needle`, which must not be empty, at or after `start` in fp string `in_` with `replacement`, never rescanning replaced text. Returns `in_`, or null if an allocation was refused, in which case the replacements before that stay made.
+///
+/// Examples:
+/// ---
+/// char* s = makeDynamic("a-b-c");
+/// scope(exit) free(s);
+/// assert(replace(s, "-", "--", 0) !is null);
+/// assert(equal(s, "a--b--c"));
+/// ---
+char* replace(N, R)(ref char* in_, N needle, R replacement, size_t start) @trusted if (isStringLike!N && isStringLike!R) {
+	const(char)[] n = slice(needle);
+	const(char)[] r = slice(replacement);
+	assert(n.length > 0);
+	// Every replacement changes `in_`, so arguments viewing it are copied first to keep the text they had.
+	char* needleCopy = null;
+	char* replacementCopy = null;
+	scope(exit) {
+		free(needleCopy);
+		free(replacementCopy);
+	}
+	if (fp.dynarray.overlaps(in_, n)) {
+		if ((needleCopy = makeDynamic(n)) is null) return null;
+		n = slice(needleCopy);
+	}
+	if (fp.dynarray.overlaps(in_, r)) {
+		if ((replacementCopy = makeDynamic(r)) is null) return null;
+		r = slice(replacementCopy);
+	}
+	while ((start = replaceFirst(in_, n, r, start)) != fp.pointer.notFound) {
+		if (start == fp.pointer.allocationRefused) return null;
+		start += r.length;
+	}
+	return in_;
+}
+
+
+/// Whether `c` is an ASCII decimal digit.
+///
+/// Examples:
+/// ---
+/// assert(isDigit('7') && !isDigit('a'));
+/// ---
+bool isDigit(char c) { return c >= '0' && c <= '9'; }
+
+/// Whether `c` is an ASCII octal digit.
+///
+/// Examples:
+/// ---
+/// assert(isOctalDigit('7') && !isOctalDigit('8'));
+/// ---
+bool isOctalDigit(char c) { return c >= '0' && c <= '7'; }
+
+/// Whether `c` is an ASCII hexadecimal digit, in either case.
+///
+/// Examples:
+/// ---
+/// assert(isHexDigit('f') && isHexDigit('F') && !isHexDigit('g'));
+/// ---
+bool isHexDigit(char c) { return isDigit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'); }
+
+/// Whether `c` is an ASCII letter.
+///
+/// Examples:
+/// ---
+/// assert(isAsciiAlpha('q') && isAsciiAlpha('Q') && !isAsciiAlpha('1'));
+/// ---
+bool isAsciiAlpha(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
+
+
 /// Encodes `codepoint` as UTF-8 and appends it to `str`, which may be null. Returns `Utf8Error.none`, or why nothing was appended.
 ///
 /// Examples:
@@ -629,7 +642,7 @@ Utf8Error appendCodepoint(ref char* str, uint codepoint) @trusted {
 
 /// Decodes the codepoint starting at `s[i]`, advancing `i` past it.
 ///
-/// Safe on arbitrary bytes: continuation bytes are bounds-checked before they are read. A truncated or malformed sequence clears `valid`, decodes as its lead byte and consumes one byte, so a caller ignoring `valid` still makes progress.
+/// Safe on arbitrary bytes: continuation bytes are bounds-checked before they are read. A sequence that is truncated, lacks a continuation byte, is overlong, or encodes a surrogate or a value above U+10FFFF clears `valid`, decodes as its lead byte and consumes one byte, so a caller ignoring `valid` still makes progress.
 ///
 /// Examples:
 /// ---
@@ -642,32 +655,37 @@ Utf8Error appendCodepoint(ref char* str, uint codepoint) @trusted {
 /// assert(decodeUtf8("\xE2", j, valid) == 0xE2 && !valid && j == 1);
 /// ---
 uint decodeUtf8(const(char)[] s, ref size_t i, out bool valid) @trusted {
-	valid = true;
 	immutable c = cast(ubyte) s[i];
-
 	if (c < 0x80) {
-		return cast(uint) s[i++];
-	} else if ((c >> 5) == 0x6 && i + 1 < s.length) {
-		immutable cp = ((c & 0x1F) << 6) | (cast(ubyte) s[i + 1] & 0x3F);
-		i += 2;
-		return cp;
-	} else if ((c >> 4) == 0xE && i + 2 < s.length) {
-		immutable cp = ((c & 0x0F) << 12)
-			| ((cast(ubyte) s[i + 1] & 0x3F) << 6)
-			| (cast(ubyte) s[i + 2] & 0x3F);
-		i += 3;
-		return cp;
-	} else if ((c >> 3) == 0x1E && i + 3 < s.length) {
-		immutable cp = ((c & 0x07) << 18)
-			| ((cast(ubyte) s[i + 1] & 0x3F) << 12)
-			| ((cast(ubyte) s[i + 2] & 0x3F) << 6)
-			| (cast(ubyte) s[i + 3] & 0x3F);
-		i += 4;
-		return cp;
+		valid = true;
+		return s[i++];
 	}
-	valid = false;
-	++i;
-	return c;
+
+	// `least` is the smallest codepoint needing `n` bytes; anything below it is an overlong encoding.
+	size_t n = 0;
+	uint cp = 0, least = 0;
+	if ((c >> 5) == 0x6) { n = 2; cp = c & 0x1F; least = 0x80; }
+	else if ((c >> 4) == 0xE) { n = 3; cp = c & 0x0F; least = 0x800; }
+	else if ((c >> 3) == 0x1E) { n = 4; cp = c & 0x07; least = 0x10000; }
+
+	valid = n != 0 && n <= s.length - i;
+	foreach (k; 1 .. valid ? n : 1) {
+		immutable b = cast(ubyte) s[i + k];
+		if ((b & 0xC0) != 0x80) {
+			valid = false;
+			break;
+		}
+		cp = (cp << 6) | (b & 0x3F);
+	}
+	if (valid && (cp < least || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)))
+		valid = false;
+
+	if (!valid) {
+		++i;
+		return c;
+	}
+	i += n;
+	return cp;
 }
 /// Ditto
 uint decodeUtf8(const(char)[] s, ref size_t i) @trusted {
@@ -700,7 +718,7 @@ uint* codepoints(S)(S str) @trusted if (isStringLike!S) {
 	return out_;
 }
 
-/// Encodes `codepoints` as a new fp string, or returns null if one is not encodable or the string could not be allocated. `codepoints` is a `uint` slice, or a `uint*` fat pointer such as the dynarray `codepoints` returns; like `isStringLike`, a static array must be passed as `array[]`.
+/// Encodes `codepoints` as a new fp string, or returns null if there are none (null is the empty string), one is not encodable, or the string could not be allocated. `codepoints` is a `uint` slice, or a `uint*` fat pointer such as the dynarray `codepoints` returns; like `isStringLike`, a static array must be passed as `array[]`.
 ///
 /// Examples:
 /// ---
@@ -712,6 +730,8 @@ uint* codepoints(S)(S str) @trusted if (isStringLike!S) {
 char* fromCodepoints(C)(C codepoints) @trusted if (!__traits(isStaticArray, C) && (is(C : const(uint)[]) || is(C : const(uint)*))) {
 	static if (is(C : const(uint)[])) const(uint)[] view = codepoints;
 	else const(uint)[] view = codepoints[0 .. fp.pointer.length(codepoints)];
+	// An empty reservation would leave a string whose first byte, unwritten, is not its terminator.
+	if (view.length == 0) return null;
 
 	char* out_ = null;
 	if (fp.dynarray.reserve(out_, view.length) is null) return null;
@@ -725,37 +745,6 @@ char* fromCodepoints(C)(C codepoints) @trusted if (!__traits(isStaticArray, C) &
 		}
 	}
 	return out_;
-}
-
-
-version(unittest) {
-	private __gshared fp.pointer.AllocFunction poisonUnderlying;
-
-	// Overwrites each block as it is freed, so code reading freed memory sees garbage rather than the text that was there.
-	private void* poisoningAlloc(void* p, size_t size) @trusted {
-		enum prefix = 16; // keeps the returned memory 16-byte aligned
-		if (size == 0) {
-			if (p !is null) {
-				size_t* block = cast(size_t*)(cast(ubyte*) p - prefix);
-				core.stdc.string.memset(p, 0xAA, *block);
-				cast(void)poisonUnderlying(block, 0);
-			}
-			return null;
-		}
-		// Dynarrays grow by allocating, copying and freeing, so nothing under test reallocates in place.
-		assert(p is null);
-		size_t* fresh = cast(size_t*) poisonUnderlying(null, size + prefix);
-		if (fresh is null) return null;
-		*fresh = size;
-		return cast(ubyte*) fresh + prefix;
-	}
-
-	// Strings made while it is active must also be freed while it is, so its `scope(exit)` restore has to be registered first.
-	private fp.pointer.AllocFunction beginPoisoningAllocator() {
-		poisonUnderlying = fp.pointer.allocFunction;
-		fp.pointer.allocFunction = &poisoningAlloc;
-		return poisonUnderlying;
-	}
 }
 
 
@@ -796,6 +785,13 @@ unittest {
 	char* stackStr = onStack;
 	free(stackStr);
 	assert(stackStr is null && onStack[0] == 'h');
+	static import fp.hashtable;
+	char* table = fp.hashtable.create!char();
+	assert(table !is null && fp.hashtable.insert(table, 'h') !is null);
+	free(table);
+	free(cast(const char*) table);
+	assert(table !is null && fp.hashtable.contains(table, 'h'));
+	fp.hashtable.free(table);
 
 	char* fmt = format("%s %s%c\n", "Hello".ptr, "World".ptr, '!');
 	scope(exit) free(fmt);
@@ -804,6 +800,7 @@ unittest {
 	char* fmtSlices = format("%s %s%c%s", "Hello", world[], '!', "");
 	scope(exit) free(fmtSlices);
 	assert(equal(fmtSlices, "Hello World!"));
+	assert(format("%s", "") is null && format("") is null);
 }
 
 unittest {
@@ -869,6 +866,17 @@ unittest {
 	assert(equal(str, "abc! bob"));
 	assert(concatenateMultiple(str, "") is str); // an empty piece is not a failure
 
+	char[4] buffer;
+	Utf8Error err;
+	assert(encodeUtf8(0x110000, buffer.ptr, err) == 0 && err == Utf8Error.outOfRange);
+	assert(encodeUtf8(0xDC00, buffer.ptr, err) == 0 && err == Utf8Error.surrogate);
+	assert(encodeUtf8(0x1F600, buffer.ptr, err) == 4 && err == Utf8Error.none);
+
+	// Characters are appended as text, not as their numeric values.
+	char* chars = createFromConcatenation('a', cast(const char) 'b', wchar('é'), dchar(0x1F600), cast(wchar) 0xD800, cast(dchar) 0x110000);
+	scope(exit) free(chars);
+	assert(slice(chars) == "abé\U0001F600\uFFFD\uFFFD");
+
 	char* name = makeDynamic("verify.d");
 	scope(exit) free(name);
 	char* out_ = null;
@@ -907,6 +915,10 @@ unittest {
 	assert(equal(replaced, "Hello WorldHello WorldHello WorldHello WorldHello World"));
 	assert(replicate(replaced, size_t.max / 5 + 1) is null);
 	assert(length(replaced) == 55);
+	char* emptied = makeDynamic("ab");
+	scope(exit) free(emptied);
+	fp.dynarray.clear(emptied);
+	assert(replicate(emptied, 3) is emptied && length(emptied) == 0);
 	assert(replace(replaced, "World", "Bob", 0) !is null);
 	assert(equal(replaced, "Hello BobHello BobHello BobHello BobHello Bob"));
 	assert(replace(replaced, "Bob", "World!", 0) !is null);
@@ -932,8 +944,8 @@ unittest {
 
 unittest {
 	// Arguments viewing the string being changed keep the text they had when passed, through reallocation, shifting and earlier replacements.
-	auto previous = beginPoisoningAllocator();
-	scope(exit) fp.pointer.allocFunction = previous;
+	auto previous = fp.dynarray.beginPoisoningAllocator();
+	scope(exit) fp.dynarray.endPoisoningAllocator(previous);
 
 	char* s = makeDynamic("abcd");
 	scope(exit) free(s);
@@ -960,6 +972,12 @@ unittest {
 	assert(equal(t, "a+b+c"));
 	assert(replace(t, "+", t, 0) !is null);
 	assert(equal(t, "aa+b+cba+b+cc"));
+
+	// A later piece viewing `u` must not read the block an earlier piece's growth freed.
+	char* u = makeDynamic("abcd");
+	scope(exit) free(u);
+	assert(concatenateMultiple(u, "x", u, slice(u)[1 .. 2]) !is null);
+	assert(equal(u, "abcdxabcdb"));
 }
 
 unittest {
@@ -967,12 +985,6 @@ unittest {
 	assert(isOctalDigit('7') && !isOctalDigit('8'));
 	assert(isHexDigit('0') && isHexDigit('f') && isHexDigit('F') && !isHexDigit('g'));
 	assert(isAsciiAlpha('a') && isAsciiAlpha('Z') && !isAsciiAlpha('0'));
-
-	char[4] buffer;
-	Utf8Error err;
-	assert(encodeUtf8(0x110000, buffer.ptr, err) == 0 && err == Utf8Error.outOfRange);
-	assert(encodeUtf8(0xDC00, buffer.ptr, err) == 0 && err == Utf8Error.surrogate);
-	assert(encodeUtf8(0x1F600, buffer.ptr, err) == 4 && err == Utf8Error.none);
 
 	char* out_ = null;
 	scope(exit) free(out_);
@@ -1002,6 +1014,17 @@ unittest {
 	size_t j = 0;
 	assert(decodeUtf8("\xc3\xa9", j) == 0xE9 && j == 2);
 
+	// A non-continuation byte, overlong forms, a surrogate and a value past U+10FFFF are all malformed.
+	static immutable string[5] malformed = ["\xc3A", "\xc0\x80", "\xe0\x80\x80", "\xed\xa0\x80", "\xf4\x90\x80\x80"];
+	foreach (s; malformed) {
+		size_t i = 0;
+		bool valid;
+		assert(decodeUtf8(s, i, valid) == cast(ubyte) s[0] && !valid && i == 1);
+		assert(codepoints(s) is null);
+	}
+	j = 0;
+	assert(decodeUtf8("\xf4\x8f\xbf\xbf", j) == 0x10FFFF && j == 4);
+
 	uint* cp = codepoints("Hello, 世界 café \U0001F600");
 	scope(exit) fp.dynarray.free(cp);
 	uint[15] cps = ['H', 'e', 'l', 'l', 'o', ',', ' ', 0x4E16, 0x754C, ' ', 'c', 'a', 'f', 0xE9, ' '];
@@ -1022,6 +1045,7 @@ unittest {
 	assert(fromCodepoints(outOfRange[]) is null);
 	uint[1] surrogate = [0xD800];
 	assert(fromCodepoints(surrogate[]) is null);
+	assert(fromCodepoints((uint[]).init) is null && fromCodepoints(cast(uint*) null) is null);
 }
 
 unittest {
@@ -1034,9 +1058,9 @@ unittest {
 		fp.dynarray.endRationedAllocator(previous);
 	}
 
-	// One slice fits the first allocation, so the refusal comes on the second push, with a partial result to free.
+	// The first allocation holds one slice, or two where slices are 8 bytes, so a later push is refused, leaving a partial result.
 	previous = fp.dynarray.beginRationedAllocator(1);
-	assert(split("a,b", ",") is null);
+	assert(split("a,b,c", ",") is null);
 	fp.dynarray.endRationedAllocator(previous);
 
 	// A refused push must leave the string untouched, not write a terminator through the null it leaves.

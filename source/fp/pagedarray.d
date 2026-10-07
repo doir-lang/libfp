@@ -173,6 +173,7 @@ PagedArray create(size_t elementSize, size_t pageBytes = defaultPageBytes) {
 }
 /// Ditto
 PagedArrayOf!T create(T)(size_t pageBytes = defaultPageBytes) {
+	mixin fp.pointer.requireAlignable!T;
 	return PagedArrayOf!T(create(T.sizeof, pageBytes));
 }
 
@@ -365,6 +366,9 @@ unittest {
 	PagedArray erased = create(long.sizeof);
 	assert(typed.elementSize == erased.elementSize);
 	assert(pageElements(typed) == pageElements(erased));
+
+	static struct Wider { align(2 * fp.pointer.maxAlignment) ubyte b; }
+	static assert(!__traits(compiles, create!Wider()));
 
 	free(ints); free(bytes); free(huge); free(typed);
 	free(erased);
