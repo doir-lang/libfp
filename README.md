@@ -19,6 +19,9 @@ in place of the old macro/prefix conventions.
   `p[a .. b]`) rather than a separate view type.
 - `fp.dynarray` — growable arrays on top of `fp.pointer`
   (`reserve`, `pushBack`, `pushFront`, `insert`, `removeAt`, `clone`, ...).
+- `fp.pagedarray` — a growable array of fixed-size pages whose elements
+  never move, for pointers that must survive further appends. A plain
+  struct with a runtime element size rather than a fat pointer.
 - `fp.fnv1a` — FNV-1a hashing over a byte slice.
 - `fp.hashtable` — a hopscotch-hashing open-addressing hash table on top of
   `fp.dynarray`.
@@ -28,12 +31,13 @@ in place of the old macro/prefix conventions.
 
 ## Building
 
-Requires [dub](https://dub.pm) and a D compiler — either DMD or LDC works
-for compile-time-sized stack allocation (`Array!(T, N)`, a plain struct
-with inline storage). The runtime-sized `pointer.alloca` mixin, however,
-needs a real `alloca()` call, and DMD fails to inline it under `-betterC`
-on Linux (a known compiler bug, [dlang/dmd#18276](https://github.com/dlang/dmd/issues/18276)),
-so use LDC to build and test:
+Requires [dub](https://dub.pm) and LDC. DMD is refused at compile time by a
+`static assert` in `fp.pointer`, which covers everything built on libfp too:
+the stack it serves (Mizu, and the DOIR compiler on top of it) is LDC-only,
+and the `alloca` mixin needs a real `alloca()` call that DMD cannot emit
+under `-betterC` ([dlang/dmd#18276](https://github.com/dlang/dmd/issues/18276)).
+`-version=FpAllowDMD` lowers the error for tools that only analyse the
+sources (`dmd -o-` syntax checks, ddoc) and never run what they build.
 
 ```sh
 dub build --config=library --compiler=ldc2   # build the static library
@@ -60,7 +64,6 @@ having run no tests; build and run such a configuration directly instead.
 ```sh
 tools/coverage.sh        # per-module summary
 tools/coverage.sh -v     # ... and every uncovered line
-DC=dmd tools/coverage.sh # measure with DMD instead of the default LDC
 ```
 
 `-cov` records its line counts through druntime, which `-betterC` does not

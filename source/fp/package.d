@@ -4,6 +4,7 @@ module fp;
 
 public import fp.pointer;
 public import fp.dynarray;
+public import fp.pagedarray;
 public import fp.fnv1a;
 public import fp.hashtable;
 public import fp.string;

@@ -2,6 +2,19 @@ module fp.pointer;
 
 import core.stdc.stdlib;
 
+// Every fp module imports this one, so this is the whole library's guard, and
+// through it that of everything built on libfp (bc-threads, libECRS, Mizu).
+// `FpAllowDMD` is the analysis-only escape hatch matching `MizuAllowDMD`.
+version(DigitalMars) {
+	version(FpAllowDMD) {} else
+		static assert(0,
+			"libfp: DMD is not supported. The stack built on libfp (Mizu, and the "
+			~ "DOIR compiler on top of it) builds only with LDC, and `alloca` needs "
+			~ "a real alloca call, which DMD cannot emit under -betterC "
+			~ "(dlang/dmd#18276). Build with LDC (--compiler=ldc2). To analyse "
+			~ "these sources with DMD without running them, set -version=FpAllowDMD.");
+}
+
 /**
 * Signature of the function used to allocate/reallocate/free the raw memory
 * backing a fat pointer. Semantics mirror `realloc`:
@@ -172,73 +185,66 @@ struct Array(T, size_t N) {
 }
 
 
+/**
+* Allocate a fat pointer on the stack with a size known only at run time.
+*
+* D has no native runtime-sized automatic (stack) arrays, so — just like the
+* C macro this replaces — this is a `mixin template`: it must be instantiated
+* directly in the scope that needs the buffer, because the `alloca` call has
+* to execute in *that* stack frame to remain valid after the mixin "returns".
+* Prefer `Array` whenever the size is known at compile time.
+*
+* The memory lives until the enclosing function returns, not until the end of
+* the block, so a use inside a loop or a deeply recursive function grows the
+* stack with every pass; reach for a heap or arena buffer there instead.
+*
+* Params:
+*   T         = element type
+*   name      = identifier the resulting `T*` is bound to
+*   countExpr = source text of a `size_t` expression for the element count
+*
+* ---
+* void process(size_t n) {
+*     mixin alloca!(float, "temp", "n");
+*     foreach (ref v; Slice(temp)) v = 1.5f;
+* } // `temp`'s storage is gone once process() returns — never return it!
+* ---
+*/
+mixin template alloca(T, string name, string countExpr) {
+	// Mixed into the caller's scope, so the caller needs `core.stdc.stdlib`
+	// in scope for the fully qualified `alloca` below to resolve.
+	import core.stdc.stdlib;
+	mixin(
+		"auto __" ~ name ~ "_count = cast(size_t)(" ~ countExpr ~ ");" 
+		~ "ubyte* __" ~ name ~ "_raw = cast(ubyte*) core.stdc.stdlib.alloca(" ~ "fp.pointer.Header.sizeof + " ~ T.stringof ~ ".sizeof * __" ~ name ~ "_count + 1);" 
+		~ T.stringof ~ "* " ~ name ~ " = fp.pointer.initStackHeader(cast(" ~ T.stringof ~ "*)(__" ~ name ~ "_raw + fp.pointer.Header.sizeof), __" ~ name ~ "_count);"
+	);
+}
 
-version(DigitalMars) {
-	// alloca is a DMD bug under -betterC on Linux (dlang/dmd#18276), so don't even try to use it there.
-} else {
-	/**
-	* Allocate a fat pointer on the stack with a size known only at run time.
-	*
-	* D has no native runtime-sized automatic (stack) arrays, so — just like the
-	* C macro this replaces — this is a `mixin template`: it must be instantiated
-	* directly in the scope that needs the buffer, because the `alloca` call has
-	* to execute in *that* stack frame to remain valid after the mixin "returns".
-	* Prefer `Array` whenever the size is known at compile time.
-	*
-	* $(B Requires LDC.) DMD fails to inline `alloca` under `-betterC` on Linux
-	* (a real `alloca()` call is emitted, which fails to link — a known DMD bug,
-	* dlang/dmd#18276) — this reproduces even for a bare, non-templated call, so
-	* it isn't specific to this mixin. Build/test with `--compiler=ldc2` when
-	* using this mixin; `Array!(T, N)` above has no such restriction.
-	*
-	* Params:
-	*   T         = element type
-	*   name      = identifier the resulting `T*` is bound to
-	*   countExpr = source text of a `size_t` expression for the element count
-	*
-	* ---
-	* void process(size_t n) {
-	*     mixin alloca!(float, "temp", "n");
-	*     foreach (ref v; Slice(temp)) v = 1.5f;
-	* } // `temp`'s storage is gone once process() returns — never return it!
-	* ---
-	*/
-	mixin template alloca(T, string name, string countExpr) {
-		// Mixed into the caller's scope, so the caller needs `core.stdc.stdlib`
-		// in scope for the fully qualified `alloca` below to resolve.
-		import core.stdc.stdlib;
-		mixin(
-			"auto __" ~ name ~ "_count = cast(size_t)(" ~ countExpr ~ ");" 
-			~ "ubyte* __" ~ name ~ "_raw = cast(ubyte*) core.stdc.stdlib.alloca(" ~ "fp.pointer.Header.sizeof + " ~ T.stringof ~ ".sizeof * __" ~ name ~ "_count + 1);" 
-			~ T.stringof ~ "* " ~ name ~ " = fp.pointer.initStackHeader(cast(" ~ T.stringof ~ "*)(__" ~ name ~ "_raw + fp.pointer.Header.sizeof), __" ~ name ~ "_count);"
-		);
-	}
+/**
+* Write a stack-allocation header for `data`/`count` and return `data`
+* back unchanged. Used by `alloca` — the mixin template's body is a
+* declaration scope, so this has to be callable as an initializer
+* expression (`T* name = initStackHeader(...);`) rather than invoked as
+* its own statement. Not normally called directly.
+*/
+package T* initStackHeader(T)(T* data, size_t count) @trusted {
+	Header* h = headerOf(data);
+	h.type = PointerType.stack;
+	h.size = count;
+	(cast(ubyte*) data)[T.sizeof * count] = 0;
+	return data;
+}
 
-	/**
-	* Write a stack-allocation header for `data`/`count` and return `data`
-	* back unchanged. Used by `alloca` — the mixin template's body is a
-	* declaration scope, so this has to be callable as an initializer
-	* expression (`T* name = initStackHeader(...);`) rather than invoked as
-	* its own statement. Not normally called directly.
-	*/
-	package T* initStackHeader(T)(T* data, size_t count) @trusted {
-		Header* h = headerOf(data);
-		h.type = PointerType.stack;
-		h.size = count;
-		(cast(ubyte*) data)[T.sizeof * count] = 0;
-		return data;
-	}
+unittest {
+	mixin alloca!(int, "arr", "20");
+	arr[10] = 6;
 
-	unittest {
-		mixin alloca!(int, "arr", "20");
-		arr[10] = 6;
-
-		assert(valid(arr));
-		assert(stackAllocated(arr));
-		assert(!heapAllocated(arr));
-		assert(length(arr) == 20);
-		assert(arr[10] == 6);
-	}
+	assert(valid(arr));
+	assert(stackAllocated(arr));
+	assert(!heapAllocated(arr));
+	assert(length(arr) == 20);
+	assert(arr[10] == 6);
 }
 
 

@@ -12,6 +12,7 @@ import core.stdc.stdio : fprintf, printf, stderr;
 private enum modules = [
     "fp.pointer",
     "fp.dynarray",
+    "fp.pagedarray",
     "fp.fnv1a",
     "fp.hashtable",
     "fp.string",
