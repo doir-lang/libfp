@@ -97,7 +97,7 @@ char* makeDynamic(S)(S str) @trusted if (isStringLike!S) {
 /// Ditto
 alias clone = makeDynamic;
 
-/// Frees `str`, which may be an fp string, a plain heap fat pointer, or memory straight from `allocFunction`; each is released by its own layer. A stack fat pointer (from `fp.pointer.Array` or `fp.pointer.alloca`) belongs to its frame and is left alone. A hash table is rejected and left untouched, since only `fp.hashtable.free` can release it. The `ref` overload also sets `str` to null, unless it was rejected.
+/// Frees `str`, which may be an fp string, a plain heap fat pointer, or memory straight from `fp.pointer.allocFunction`; each is released by its own layer. A stack fat pointer (from `fp.pointer.Array` or `fp.pointer.alloca`) belongs to its frame and is left alone. A hash table is rejected and left untouched, since only `fp.hashtable.free` can release it. Anything else is passed to `fp.pointer.allocFunction` as though it came from it, so a string literal or a stack buffer must not be freed here. The `ref` overload also sets `str` to null, unless it was rejected.
 ///
 /// Examples:
 /// ---
@@ -118,6 +118,11 @@ void free(const char* str) @trusted {
 	if (fp.dynarray.valid(str)) fp.dynarray.free(str);
 	else if (fp.pointer.valid(str) && fp.pointer.heapAllocated(str)) fp.pointer.free(str);
 	else cast(void)fp.pointer.allocFunction(cast(void*) str, 0);
+}
+
+// Only a dynarray can grow in place, so a plain heap or stack pointer is refused instead of asserted away.
+private bool growable(const char* str) @trusted {
+	return str is null || fp.dynarray.valid(cast(void*) str);
 }
 
 private enum bool isSliceArg(T) = isStringLike!T && !is(T : const(char)*);
@@ -198,18 +203,18 @@ bool equal(A, B)(A a, B b) @trusted if (isStringLike!A && isStringLike!B) {
 }
 
 
-/// The index of the first `needle` in `haystack` at or after `start`, or `fp.pointer.notFound`.
+/// The index of the first `needle` in `haystack` at or after `start`, or `fp.pointer.notFound`, including when `start` is past the end.
 ///
 /// Examples:
 /// ---
 /// assert(find("abcabc", "bc", 2) == 4);
 /// assert(find("abc", "x", 0) == fp.pointer.notFound);
+/// assert(find("abc", "abc", 4) == fp.pointer.notFound);
 /// ---
 size_t find(H, N)(H haystack, N needle, size_t start) @trusted if (isStringLike!H && isStringLike!N) {
 	const(char)[] h = slice(haystack);
 	const(char)[] n = slice(needle);
-	assert(start <= h.length);
-	if (n.length > h.length - start) return fp.pointer.notFound;
+	if (start > h.length || n.length > h.length - start) return fp.pointer.notFound;
 
 	immutable bound = h.length - n.length;
 	outer: for (size_t i = start; i <= bound; ++i) {
@@ -294,6 +299,30 @@ const(char)[]* split(S, D)(S str, D delimiter) @trusted if (isStringLike!S && is
 }
 
 
+/// Appends `b` to `a`, which may be null. Returns `a`, or null if it could not grow (leaving it unchanged), both are empty, or `a` is a pointer that is not an fp string and so cannot grow.
+///
+/// Examples:
+/// ---
+/// char* s = null;
+/// scope(exit) free(s);
+/// assert(concatenate(s, "ab") !is null);
+/// assert(concatenate(s, "cd".ptr) !is null);
+/// assert(equal(s, "abcd"));
+///
+/// char* heap = fp.pointer.malloc!char(4);
+/// assert(concatenate(heap, "!") is null);
+/// fp.string.free(heap);
+/// ---
+char* concatenate(S)(ref char* a, S b) @trusted if (isStringLike!S) {
+	if (!growable(a)) return null;
+	const(char)[] view = slice(b);
+	if (length(a) + view.length == 0) return null;
+	if (!fp.dynarray.concatenate(a, view)) return null;
+	// The NUL written at allocation sits at the end of the capacity, which may run past the string.
+	a[length(a)] = 0;
+	return a;
+}
+
 /// Appends character `c` to `str`, which may be null. Returns `str`, or null if it could not grow (leaving it unchanged).
 ///
 /// Examples:
@@ -306,26 +335,6 @@ const(char)[]* split(S, D)(S str, D delimiter) @trusted if (isStringLike!S && is
 /// ---
 char* append(ref char* str, char c) @trusted {
 	return concatenate(str, (&c)[0 .. 1]);
-}
-
-/// Appends `b` to `a`, which may be null. Returns `a`, or null if it could not grow (leaving it unchanged) or both are empty.
-///
-/// Examples:
-/// ---
-/// char* s = null;
-/// scope(exit) free(s);
-/// assert(concatenate(s, "ab") !is null);
-/// assert(concatenate(s, "cd".ptr) !is null);
-/// assert(equal(s, "abcd"));
-/// ---
-char* concatenate(S)(ref char* a, S b) @trusted if (isStringLike!S) {
-	assert(fp.pointer.valid(a) || a is null);
-	const(char)[] view = slice(b);
-	if (length(a) + view.length == 0) return null;
-	if (!fp.dynarray.concatenate(a, view)) return null;
-	// The NUL written at allocation sits at the end of the capacity, which may run past the string.
-	a[length(a)] = 0;
-	return a;
 }
 
 
@@ -466,7 +475,7 @@ char* createFromConcatenation(Args...)(Args pieces) {
 }
 
 
-/// Repeats fp string `str` so it holds `times` copies of itself. A `times` of 0 frees it, leaving null, and an empty `str` stays as it is. Returns `str`, or null if an allocation was refused or the length would overflow, leaving `str` unchanged.
+/// Repeats fp string `str` so it holds `times` copies of itself. A `times` of 0 frees it, leaving null, and an empty `str` stays as it is. Returns `str`, or null if an allocation was refused, the length would overflow, or `str` is a pointer that is not an fp string and so cannot grow, leaving `str` unchanged.
 ///
 /// Examples:
 /// ---
@@ -482,7 +491,7 @@ char* replicate(ref char* str, size_t times) @trusted {
 	}
 	if (length(str) == 0) return str;
 
-	assert(fp.pointer.valid(str));
+	if (!growable(str)) return null;
 	char* one = makeDynamic(str);
 	scope(exit) free(one);
 	bool overflow = false;
@@ -495,7 +504,7 @@ char* replicate(ref char* str, size_t times) @trusted {
 }
 
 
-/// Replaces the `rangeLen` characters of fp string `in_` starting at `start` with `with_`. Returns `in_`, or null if an allocation was refused (leaving it unchanged).
+/// Replaces the `rangeLen` characters of fp string `in_` starting at `start`, which must fit within the string, with `with_`. Returns `in_`, or null if an allocation was refused or `in_` is a pointer that is not an fp string and so cannot grow, leaving it unchanged.
 ///
 /// Examples:
 /// ---
@@ -505,7 +514,7 @@ char* replicate(ref char* str, size_t times) @trusted {
 /// assert(equal(s, "Hello Bob"));
 /// ---
 char* replaceRange(S)(ref char* in_, S with_, size_t start, size_t rangeLen) @trusted if (isStringLike!S) {
-	assert(fp.pointer.valid(in_));
+	if (!growable(in_)) return null;
 	const(char)[] w = slice(with_);
 	immutable inLen = length(in_);
 	assert(rangeLen <= inLen && start <= inLen - rangeLen);
@@ -622,7 +631,7 @@ bool isHexDigit(char c) { return isDigit(c) || (c >= 'a' && c <= 'f') || (c >= '
 bool isAsciiAlpha(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
 
 
-/// Encodes `codepoint` as UTF-8 and appends it to `str`, which may be null. Returns `Utf8Error.none`, or why nothing was appended.
+/// Encodes `codepoint` as UTF-8 and appends it to `str`, which may be null. Returns `Utf8Error.none`, or why nothing was appended: `Utf8Error.outOfRange` or `Utf8Error.surrogate` for an unencodable value, `Utf8Error.allocationRefused` when `str` cannot grow, which includes a pointer that is not an fp string.
 ///
 /// Examples:
 /// ---
@@ -824,6 +833,7 @@ unittest {
 
 	assert(find(bang, "World!", 0) == 6 && contains(bang, "World!", 0));
 	assert(find(bang, "zzz", 0) == fp.pointer.notFound && !contains(bang, "zzz", 0));
+	assert(find(bang, "", length(bang)) == length(bang) && find(bang, "", 100) == fp.pointer.notFound);
 	assert(startsWith(bang, "Hello", 0));
 	assert(endsWith(bang, "World!", 0) && !endsWith(bang, "World", 0));
 	assert(startsWith(bang, "", length(bang)) && !startsWith(bang, "", 100) && !startsWith(bang, "", size_t.max));
@@ -865,6 +875,20 @@ unittest {
 	assert(concatenate(str, " bob") !is null);
 	assert(equal(str, "abc! bob"));
 	assert(concatenateMultiple(str, "") is str); // an empty piece is not a failure
+
+	// A pointer that is not an fp string cannot grow in place, so appending to it is refused rather than asserted away.
+	char* heap = fp.pointer.malloc!char(4);
+	assert(heap !is null);
+	assert(concatenate(heap, "x") is null && append(heap, 'y') is null);
+	assert(replicate(heap, 2) is null && replaceRange(heap, "z", 0, 1) is null);
+	free(heap);
+	assert(heap is null);
+
+	fp.pointer.Array!(char, 4) onStack;
+	onStack[0] = 'a';
+	char* stackStr = onStack;
+	assert(fp.pointer.pointerType(stackStr) == fp.pointer.PointerType.stack);
+	assert(concatenate(stackStr, "b") is null && append(stackStr, 'c') is null);
 
 	char[4] buffer;
 	Utf8Error err;

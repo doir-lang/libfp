@@ -8,12 +8,17 @@ Ported from an earlier C/C++ implementation (parallel C-macro and C++ template A
 
 - `fp.pointer` — the fat pointer core: `malloc`/`realloc`/`free`, stack allocation (`Array!(T, N)`), `valid`/`length`/`stackAllocated`/etc.
   Non-owning views are just native D slices (`pointer.slice(p)` or `p[a .. b]`) rather than a separate view type.
+- `fp.lifecycle` — how containers copy, move and end their elements: `isBitMoveable`, `moveInto`, `copyInto`, `swapInto`, `endLifetime`, and the `Owned` wrapper for a container that should free its fat pointer elements.
 - `fp.dynarray` — growable arrays on top of `fp.pointer` (`reserve`, `pushBack`, `pushFront`, `insert`, `removeAt`, `clone`, ...).
 - `fp.pagedarray` — a growable array of fixed-size pages whose elements never move, for pointers that must survive further appends.
   A plain struct with a runtime element size rather than a fat pointer.
 - `fp.fnv1a` — FNV-1a hashing over a byte slice.
 - `fp.hashtable` — a hopscotch-hashing open-addressing hash table on top of `fp.dynarray`.
 - `fp.string` — null-terminated dynamic strings on top of `fp.dynarray`, with UTF-8 ⇄ UTF-32 conversion.
+
+## Imports
+
+`import fp;` brings in every module, so `fp.dynarray.pushBack(arr, 1)` and `fp.string.free(text)` both work. The names several modules share (`free`, `length`, `create`, `capacity`, `find`, `insert`, ...) are ambiguous unqualified and must be written with their module. Importing one module on its own, `import fp.dynarray;`, gives its names unqualified but leaves the other layers out of scope until they are imported too.
 
 
 ## Building

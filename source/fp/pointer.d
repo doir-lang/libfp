@@ -12,6 +12,7 @@ module fp.pointer;
 
 import core.stdc.stdlib;
 static import core.checkedint;
+static import fp.lifecycle;
 
 version(DigitalMars) {
 	version(FpAllowDMD) {} else
@@ -153,219 +154,6 @@ package H* containerHeaderOf(H)(inout void* p) @trusted {
 	return cast(H*)(cast(const(ubyte)*) p - H.sizeof);
 }
 
-/// Allocates `payloadBytes` bytes of elements behind a container header of type `H`, which ends in a `Header`. The header is reset to `H.init` and tagged `type`, with no elements, and a terminator follows the payload. Returns the first element, or null if the allocator refused or the total would overflow.
-///
-/// Examples:
-/// ---
-/// static struct Extended { ubyte[headerPadding!(size_t.sizeof + Header.sizeof)] padding; size_t capacity; Header base; }
-/// int* p = cast(int*) allocContainer!Extended(4 * int.sizeof, PointerType.dynarray);
-/// assert(p !is null);
-/// scope(exit) cast(void)allocFunction(containerHeaderOf!Extended(p), 0);
-/// assert(pointerType(p) == PointerType.dynarray && containerHeaderOf!Extended(p).capacity == 0);
-/// ---
-package void* allocContainer(H)(size_t payloadBytes, PointerType type) @trusted {
-	static assert(H.sizeof % maxAlignment == 0, "fp.pointer: " ~ H.stringof ~ " must be padded to a multiple of maxAlignment");
-	bool overflow = false;
-	immutable total = core.checkedint.addu(core.checkedint.addu(H.sizeof, payloadBytes, overflow), 1, overflow);
-	if (overflow) return null;
-	ubyte* raw = cast(ubyte*) allocFunction(null, total);
-	if (raw is null) return null;
-
-	*cast(H*) raw = H.init;
-	ubyte* data = raw + H.sizeof;
-	headerOf(data).type = type;
-	data[payloadBytes] = 0;
-	return data;
-}
-
-/// Rejects, at compile time, an element type `T` whose alignment exceeds `maxAlignment`, which only `Array` can hold.
-///
-/// Examples:
-/// ---
-/// mixin requireAlignable!long;
-/// ---
-mixin template requireAlignable(T) {
-	// The mixin site need not have `fp` in scope.
-	static import fp.pointer;
-	static assert(T.alignof <= fp.pointer.maxAlignment, "fp.pointer: " ~ T.stringof ~ " needs more alignment than maxAlignment; only fp.pointer.Array accepts it");
-}
-
-/// Allocates, reallocates (when `p` is non-null) or, when `size` is 0, frees a heap fat pointer of `size` bytes, recording `size` in its header. Returns null if the allocator refused or the total with the header would overflow, leaving `p` untouched.
-///
-/// Examples:
-/// ---
-/// void* p = rawAlloc(null, 8);
-/// assert(headerOf(p).size == 8);
-/// assert(rawAlloc(p, 0) is null);
-/// ---
-package void* rawAlloc(void* p, size_t size) @trusted {
-	if (p is null && size == 0) return null;
-	assert(p is null || headerOf(p).type == PointerType.heap, "fp.pointer: not a heap fat pointer; free each kind through its own module");
-	if (size == 0) {
-		cast(void)allocFunction(cast(ubyte*) p - prefixBytes, 0);
-		return null;
-	}
-
-	void* base = p is null ? null : cast(ubyte*) p - prefixBytes;
-	bool overflow = false;
-	immutable total = core.checkedint.addu(core.checkedint.addu(prefixBytes, size, overflow), 1, overflow);
-	if (overflow) return null;
-	ubyte* raw = cast(ubyte*) allocFunction(base, total);
-	if (raw is null) return null;
-
-	ubyte* data = raw + prefixBytes;
-	Header* h = headerOf(data);
-	h.type = PointerType.heap;
-	h.size = size;
-	data[size] = 0;
-	return data;
-}
-
-/// `rawAlloc` for `count` elements of `elemSize` bytes each, recording the element count rather than the byte count. Returns null if the allocator refused or the byte count would overflow, leaving `p` untouched.
-///
-/// Examples:
-/// ---
-/// void* p = rawRealloc(null, int.sizeof, 4);
-/// assert(headerOf(p).size == 4);
-/// cast(void)rawAlloc(p, 0);
-/// ---
-package void* rawRealloc(void* p, size_t elemSize, size_t count) @trusted {
-	bool overflow = false;
-	immutable bytes = core.checkedint.mulu(elemSize, count, overflow);
-	if (overflow) return null;
-	void* data = rawAlloc(p, bytes);
-	if (data is null) return null;
-	headerOf(data).size = count;
-	return data;
-}
-
-
-/// Allocates a heap fat pointer to `n` uninitialized `T`s, or returns null if `n` is 0, the allocator refused, or their byte count would overflow.
-///
-/// Examples:
-/// ---
-/// float* p = malloc!float(4);
-/// scope(exit) free(p);
-/// assert(length(p) == 4);
-/// assert(heapAllocated(p));
-/// ---
-T* malloc(T)(size_t n) {
-	mixin requireAlignable!T;
-	return cast(T*) rawRealloc(null, T.sizeof, n);
-}
-
-/// Resizes heap fat pointer `p` (or allocates one, if `p` is null) to `n` elements, preserving the existing ones. Returns null if the allocator refused or their byte count would overflow, in which case `p` is still valid. An `n` of 0 instead frees `p`, also returning null, so `p` must not be used or freed again.
-///
-/// Examples:
-/// ---
-/// int* p = malloc!int(2);
-/// p[1] = 7;
-/// int* bigger = realloc(p, 10);
-/// assert(bigger !is null);
-/// p = bigger;
-/// scope(exit) free(p);
-/// assert(length(p) == 10);
-/// assert(p[1] == 7);
-/// ---
-T* realloc(T)(T* p, size_t n) {
-	mixin requireAlignable!T;
-	return cast(T*) rawRealloc(cast(void*) p, T.sizeof, n);
-}
-
-/// Frees heap fat pointer `p`, which may be null but must not be another kind of fat pointer. The `ref` overload also sets `p` to null.
-///
-/// Examples:
-/// ---
-/// int* p = malloc!int(1);
-/// free(p);
-/// assert(p is null);
-/// free(p); // freeing null is a no-op
-/// ---
-void free(T)(ref T* p) {
-	cast(void)rawAlloc(cast(void*) p, 0);
-	p = null;
-}
-/// Ditto
-void free(T)(const T* p) {
-	cast(void)rawAlloc(cast(void*) p, 0);
-}
-
-
-/// A fat pointer to `N` elements in automatic (stack) storage, with its header and terminator alongside. It converts to `T*` implicitly. Unlike the heap containers, it accepts any `T.alignof`.
-///
-/// Examples:
-/// ---
-/// Array!(int, 4) arr;
-/// arr[0] = 3;
-/// assert(length(arr) == 4);
-/// assert(stackAllocated(arr));
-/// ---
-struct Array(T, size_t N) {
-	private ubyte[(T.alignof - Header.sizeof % T.alignof) % T.alignof] padding;
-	private Header header = Header(PointerType.stack, N);
-	private T[N] storage;
-	private ubyte terminator = 0;
-
-	/// The fat pointer itself.
-	///
-	/// Examples:
-	/// ---
-	/// Array!(char, 2) text;
-	/// char* p = text.ptr;
-	/// assert(length(p) == 2);
-	/// ---
-	@property inout(T)* ptr() inout pure return {
-		return storage.ptr;
-	}
-
-	alias ptr this;
-}
-
-/// Writes a stack header and terminator around `count` elements at `data`, returning `data`. `alloca` calls it as an initializer expression, since a mixin template's body cannot hold statements; it is public because that expression runs in the caller's scope.
-///
-/// Examples:
-/// ---
-/// align(maxAlignment) ubyte[prefixBytes + 3 * int.sizeof + 1] buffer;
-/// int* p = initStackHeader(cast(int*)(buffer.ptr + prefixBytes), 3);
-/// assert(length(p) == 3 && stackAllocated(p));
-/// ---
-T* initStackHeader(T)(T* data, size_t count) @trusted {
-	Header* h = headerOf(data);
-	h.type = PointerType.stack;
-	h.size = count;
-	(cast(ubyte*) data)[T.sizeof * count] = 0;
-	return data;
-}
-
-/// Declares `T* name`, a fat pointer to `countExpr` elements allocated on the stack with `alloca`, for when the size is only known at run time; prefer `Array` when it is known at compile time.
-///
-/// It is a mixin template because `alloca` must run in the stack frame that uses the memory. That memory lives until the enclosing function returns, not until the end of the block, so using it in a loop or a deeply recursive function grows the stack with every pass.
-///
-/// Params:
-///   T         = element type
-///   name      = identifier the resulting `T*` is bound to
-///   countExpr = source text of a `size_t` expression for the element count
-///
-/// Examples:
-/// ---
-/// size_t n = 5;
-/// mixin alloca!(float, "temp", "n");
-/// foreach (ref v; slice(temp)) v = 1.5f;
-/// assert(length(temp) == 5 && temp[4] == 1.5f);
-/// ---
-mixin template alloca(T, string name, string countExpr) {
-	// The body resolves names where it is mixed in, which need not have `fp` in scope.
-	static import core.stdc.stdlib;
-	static import fp.pointer;
-	mixin fp.pointer.requireAlignable!T;
-	mixin(
-		"auto __" ~ name ~ "_count = cast(size_t)(" ~ countExpr ~ ");"
-		~ "ubyte* __" ~ name ~ "_raw = cast(ubyte*) core.stdc.stdlib.alloca(fp.pointer.prefixBytes + T.sizeof * __" ~ name ~ "_count + 1);"
-		~ "T* " ~ name ~ " = fp.pointer.initStackHeader(cast(T*)(__" ~ name ~ "_raw + fp.pointer.prefixBytes), __" ~ name ~ "_count);"
-	);
-}
-
-
 /// Whether `p` is a live fat pointer of any kind. A dynarray or hash table that has capacity but no elements yet is valid; any other empty one is not.
 ///
 /// Examples:
@@ -456,6 +244,249 @@ bool empty(inout void* p) {
 	return length(p) == 0;
 }
 
+/// Allocates `payloadBytes` bytes of elements behind a container header of type `H`, which ends in a `Header`. The header is reset to `H.init` and tagged `type`, with no elements, and a terminator follows the payload. Returns the first element, or null if the allocator refused or the total would overflow.
+///
+/// Examples:
+/// ---
+/// static struct Extended { ubyte[headerPadding!(size_t.sizeof + Header.sizeof)] padding; size_t capacity; Header base; }
+/// int* p = cast(int*) allocContainer!Extended(4 * int.sizeof, PointerType.dynarray);
+/// assert(p !is null);
+/// scope(exit) cast(void)allocFunction(containerHeaderOf!Extended(p), 0);
+/// assert(pointerType(p) == PointerType.dynarray && containerHeaderOf!Extended(p).capacity == 0);
+/// ---
+package void* allocContainer(H)(size_t payloadBytes, PointerType type) @trusted {
+	static assert(H.sizeof % maxAlignment == 0, "fp.pointer: " ~ H.stringof ~ " must be padded to a multiple of maxAlignment");
+	bool overflow = false;
+	immutable total = core.checkedint.addu(core.checkedint.addu(H.sizeof, payloadBytes, overflow), 1, overflow);
+	if (overflow) return null;
+	ubyte* raw = cast(ubyte*) allocFunction(null, total);
+	if (raw is null) return null;
+
+	*cast(H*) raw = H.init;
+	ubyte* data = raw + H.sizeof;
+	headerOf(data).type = type;
+	data[payloadBytes] = 0;
+	return data;
+}
+
+/// Rejects, at compile time, an element type `T` whose alignment exceeds `maxAlignment`, which only `Array` can hold.
+///
+/// Examples:
+/// ---
+/// mixin requireAlignable!long;
+/// ---
+mixin template requireAlignable(T) {
+	// The mixin site need not have `fp` in scope.
+	static import fp.pointer;
+	static assert(T.alignof <= fp.pointer.maxAlignment, "fp.pointer: " ~ T.stringof ~ " needs more alignment than maxAlignment; only fp.pointer.Array accepts it");
+}
+
+/// Allocates, reallocates (when `p` is non-null) or, when `size` is 0, frees a heap fat pointer of `size` bytes, recording `size` in its header. `p` must be null or a heap fat pointer. Returns null if the allocator refused or the total with the header would overflow, leaving `p` untouched.
+///
+/// Examples:
+/// ---
+/// void* p = rawAlloc(null, 8);
+/// assert(headerOf(p).size == 8);
+/// assert(rawAlloc(p, 0) is null);
+/// ---
+package void* rawAlloc(void* p, size_t size) @trusted {
+	if (p is null && size == 0) return null;
+	assert(p is null || headerOf(p).type == PointerType.heap, "fp.pointer: not a heap fat pointer; free each kind through its own module");
+	if (size == 0) {
+		cast(void)allocFunction(cast(ubyte*) p - prefixBytes, 0);
+		return null;
+	}
+
+	void* base = p is null ? null : cast(ubyte*) p - prefixBytes;
+	bool overflow = false;
+	immutable total = core.checkedint.addu(core.checkedint.addu(prefixBytes, size, overflow), 1, overflow);
+	if (overflow) return null;
+	ubyte* raw = cast(ubyte*) allocFunction(base, total);
+	if (raw is null) return null;
+
+	ubyte* data = raw + prefixBytes;
+	Header* h = headerOf(data);
+	h.type = PointerType.heap;
+	h.size = size;
+	data[size] = 0;
+	return data;
+}
+
+/// `rawAlloc` for `count` elements of `elemSize` bytes each, recording the element count rather than the byte count. Returns null if the allocator refused or the byte count would overflow, leaving `p` untouched.
+///
+/// Examples:
+/// ---
+/// void* p = rawRealloc(null, int.sizeof, 4);
+/// assert(headerOf(p).size == 4);
+/// cast(void)rawAlloc(p, 0);
+/// ---
+package void* rawRealloc(void* p, size_t elemSize, size_t count) @trusted {
+	bool overflow = false;
+	immutable bytes = core.checkedint.mulu(elemSize, count, overflow);
+	if (overflow) return null;
+	void* data = rawAlloc(p, bytes);
+	if (data is null) return null;
+	headerOf(data).size = count;
+	return data;
+}
+
+
+/// Allocates a heap fat pointer to `n` uninitialized `T`s, or returns null if `n` is 0, the allocator refused, or their byte count would overflow. Elements whose lifetime is not their bytes are left empty.
+///
+/// Examples:
+/// ---
+/// float* p = malloc!float(4);
+/// scope(exit) free(p);
+/// assert(length(p) == 4);
+/// assert(heapAllocated(p));
+/// ---
+T* malloc(T)(size_t n) {
+	mixin requireAlignable!T;
+	T* p = cast(T*) rawRealloc(null, T.sizeof, n);
+	fp.lifecycle.initSlots(p, n);
+	return p;
+}
+
+/// Resizes heap fat pointer `p` (or allocates one, if `p` is null) to `n` elements, preserving the existing ones. Returns null if the allocator refused or their byte count would overflow, in which case `p` is still valid. An `n` of 0 instead frees `p`, also returning null, so `p` must not be used or freed again. Elements whose lifetime is not their bytes are ended in the slots `p` loses and left empty in the ones it gains; shrinking such a type moves the kept elements into a new block.
+///
+/// Examples:
+/// ---
+/// int* p = malloc!int(2);
+/// p[1] = 7;
+/// int* bigger = realloc(p, 10);
+/// assert(bigger !is null);
+/// p = bigger;
+/// scope(exit) free(p);
+/// assert(length(p) == 10);
+/// assert(p[1] == 7);
+/// ---
+T* realloc(T)(T* p, size_t n) {
+	mixin requireAlignable!T;
+	immutable oldLength = length(p);
+	static if (!fp.lifecycle.isBitMoveable!T) {
+		// Truncating the block would drop the removed elements' bytes before their lifetimes could end, so a shrink moves the kept ones into a fresh block.
+		if (n < oldLength) {
+			if (n == 0) {
+				fp.lifecycle.endLifetimes(p, oldLength);
+				cast(void) rawAlloc(p, 0);
+				return null;
+			}
+			T* data = cast(T*) rawAlloc(null, T.sizeof * n);
+			if (data is null) return null;
+			fp.lifecycle.initSlots(data, n);
+			fp.lifecycle.moveRange(data, p, n);
+			fp.lifecycle.endLifetimes(p + n, oldLength - n);
+			cast(void) rawAlloc(p, 0);
+			headerOf(data).size = n;
+			return data;
+		}
+	}
+	T* data = cast(T*) rawRealloc(cast(void*) p, T.sizeof, n);
+	if (data !is null && n > oldLength) fp.lifecycle.initSlots(data + oldLength, n - oldLength);
+	return data;
+}
+
+/// Frees heap fat pointer `p`, which may be null but must not be another kind of fat pointer, ending the lifetimes of its elements first. The `ref` overload also sets `p` to null.
+///
+/// Examples:
+/// ---
+/// int* p = malloc!int(1);
+/// free(p);
+/// assert(p is null);
+/// free(p); // freeing null is a no-op
+/// ---
+void free(T)(ref T* p) {
+	fp.lifecycle.endLifetimes(p, length(p));
+	cast(void)rawAlloc(cast(void*) p, 0);
+	p = null;
+}
+/// Ditto
+void free(T)(const T* p) {
+	fp.lifecycle.endLifetimes(cast(T*) p, length(p));
+	cast(void)rawAlloc(cast(void*) p, 0);
+}
+
+
+/// A fat pointer to `N` elements in automatic (stack) storage, with its header and terminator alongside. It converts to `T*` implicitly. Unlike the heap containers, it accepts any `T.alignof`. Elements whose type declares a lifetime have it ended when the declaration goes out of scope, and such an `Array` must not be copied: the copy shares the elements' bytes, so both would end the same lifetimes.
+///
+/// Examples:
+/// ---
+/// Array!(int, 4) arr;
+/// arr[0] = 3;
+/// assert(length(arr) == 4);
+/// assert(stackAllocated(arr));
+/// ---
+struct Array(T, size_t N) {
+	private ubyte[(T.alignof - Header.sizeof % T.alignof) % T.alignof] padding;
+	private Header header = Header(PointerType.stack, N);
+	private T[N] storage;
+	private ubyte terminator = 0;
+
+	// Automatic storage cannot outlive the declaration, so elements with a lifetime declared must have it ended here.
+	static if (!fp.lifecycle.isBitMoveable!T) {
+		~this() @nogc nothrow { fp.lifecycle.endLifetimes(storage.ptr, N); }
+	}
+
+	/// The fat pointer itself.
+	///
+	/// Examples:
+	/// ---
+	/// Array!(char, 2) text;
+	/// char* p = text.ptr;
+	/// assert(length(p) == 2);
+	/// ---
+	@property inout(T)* ptr() inout pure return {
+		return storage.ptr;
+	}
+
+	alias ptr this;
+}
+
+/// Writes a stack header and terminator around `count` elements at `data`, returning `data`. `alloca` calls it as an initializer expression, since a mixin template's body cannot hold statements; it is public because that expression runs in the caller's scope.
+///
+/// Examples:
+/// ---
+/// align(maxAlignment) ubyte[prefixBytes + 3 * int.sizeof + 1] buffer;
+/// int* p = initStackHeader(cast(int*)(buffer.ptr + prefixBytes), 3);
+/// assert(length(p) == 3 && stackAllocated(p));
+/// ---
+T* initStackHeader(T)(T* data, size_t count) @trusted {
+	Header* h = headerOf(data);
+	h.type = PointerType.stack;
+	h.size = count;
+	(cast(ubyte*) data)[T.sizeof * count] = 0;
+	fp.lifecycle.initSlots(data, count);
+	return data;
+}
+
+/// Declares `T* name`, a fat pointer to `countExpr` elements allocated on the stack with `alloca`, for when the size is only known at run time; prefer `Array` when it is known at compile time.
+///
+/// It is a mixin template because `alloca` must run in the stack frame that uses the memory. That memory lives until the enclosing function returns, not until the end of the block, so using it in a loop or a deeply recursive function grows the stack with every pass. Unlike `Array`, no destructor ends the elements' lifetimes, since the only thing in scope is a plain `T*`; call `fp.lifecycle.endLifetimes` before the frame goes away if `T` declares one.
+///
+/// Params:
+///   T         = element type
+///   name      = identifier the resulting `T*` is bound to
+///   countExpr = source text of a `size_t` expression for the element count
+///
+/// Examples:
+/// ---
+/// size_t n = 5;
+/// mixin alloca!(float, "temp", "n");
+/// foreach (ref v; slice(temp)) v = 1.5f;
+/// assert(length(temp) == 5 && temp[4] == 1.5f);
+/// ---
+mixin template alloca(T, string name, string countExpr) {
+	// The body resolves names where it is mixed in, which need not have `fp` in scope.
+	static import core.stdc.stdlib;
+	static import fp.pointer;
+	mixin fp.pointer.requireAlignable!T;
+	mixin(
+		"auto __" ~ name ~ "_count = cast(size_t)(" ~ countExpr ~ ");"
+		~ "ubyte* __" ~ name ~ "_raw = cast(ubyte*) core.stdc.stdlib.alloca(fp.pointer.prefixBytes + T.sizeof * __" ~ name ~ "_count + 1);"
+		~ "T* " ~ name ~ " = fp.pointer.initStackHeader(cast(T*)(__" ~ name ~ "_raw + fp.pointer.prefixBytes), __" ~ name ~ "_count);"
+	);
+}
+
 
 /// A pointer to the first element of `p`.
 ///
@@ -495,6 +526,16 @@ inout(T)[] slice(T)(inout T* p) {
 }
 
 
+version(unittest) {
+	private __gshared int finalizeCount = 0;
+
+	private struct Handle {
+		int* data;
+		void finalize() @nogc nothrow { if (data !is null) { ++finalizeCount; data = null; } }
+	}
+}
+
+
 unittest {
 	int* arr = malloc!int(20);
 	assert(arr !is null);
@@ -530,6 +571,25 @@ unittest {
 	assert(malloc!ubyte(size_t.max) is null);
 	assert(realloc(arr, size_t.max / 4 + 2) is null);
 	assert(length(arr) == 25 && arr[20] == 6);
+
+	// Elements with a lifetime: `malloc` starts them empty, `realloc` ends the slots it drops and empties the ones it adds, `free` ends the rest.
+	static assert(!fp.lifecycle.isBitMoveable!Handle);
+	Handle* owned = malloc!Handle(3);
+	assert(owned !is null && owned[2].data is null);
+	owned[0].data = cast(int*) 1;
+	owned[1].data = cast(int*) 2;
+	finalizeCount = 0;
+	Handle* shrunk = realloc!Handle(owned, 1);
+	assert(shrunk !is null && length(shrunk) == 1 && finalizeCount == 1);
+	Handle* grown = realloc!Handle(shrunk, 3);
+	assert(grown !is null && grown[2].data is null && finalizeCount == 1);
+	free(grown);
+	assert(grown is null && finalizeCount == 2);
+
+	Handle* cleared = malloc!Handle(2);
+	cleared[0].data = cast(int*) 7;
+	finalizeCount = 0;
+	assert(realloc!Handle(cleared, 0) is null && finalizeCount == 1); // an `n` of 0 frees, ending every element's lifetime
 }
 
 unittest {
@@ -537,6 +597,15 @@ unittest {
 	fixed[10] = 6;
 	assert(valid(fixed) && stackAllocated(fixed) && !heapAllocated(fixed));
 	assert(length(fixed) == 20 && fixed[10] == 6);
+
+	// A stack array ends the lifetimes of elements whose type declares one, at the end of the block they live in.
+	finalizeCount = 0;
+	{
+		Array!(Handle, 3) handles;
+		handles[0].data = cast(int*) 1;
+		assert(handles[1].data is null);
+	}
+	assert(finalizeCount == 1);
 
 	// Where `fp` names something else, as after `import fp.pointer : alloca;`, the mixin must still reach its own module.
 	int fp = 0;
