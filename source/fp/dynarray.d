@@ -1,5 +1,7 @@
 /// Growable arrays on top of `fp.pointer`. A dynarray is a plain `T*` whose header also records its capacity, so it indexes like any pointer and grows like a vector. A null `T*` is an empty dynarray, ready to grow.
 ///
+/// Elements are copied, moved and ended by `fp.lifecycle`'s convention, so a dynarray of elements with lifetimes ends them when it is freed, cleared, shrunk or has elements removed; element types whose lifetime is their bytes still move with `memcpy`.
+///
 /// Every function that can allocate reports a refused allocation, or a size whose byte count would overflow, by returning null or false, and leaves the array as it was.
 ///
 /// Examples:
@@ -15,6 +17,7 @@ module fp.dynarray;
 import core.stdc.string;
 static import core.checkedint;
 
+static import fp.lifecycle;
 static import fp.pointer;
 public import fp.pointer : length, size, empty, front, back, slice; // As aliases that can be applied to dynarrays
 
@@ -60,7 +63,8 @@ package Header* headerOf(inout void* p) {
 /// assert(validDynarray(arr));
 /// ---
 bool validDynarray(inout void* p) @trusted {
-	return headerOf(p).base.type == fp.pointer.PointerType.dynarray;
+	// The tag check reads only the shared 16-byte header: this module's is larger and would overrun a fat pointer that is not a dynarray.
+	return fp.pointer.valid(p) && fp.pointer.headerOf(p).type == fp.pointer.PointerType.dynarray;
 }
 
 /// Ditto
@@ -104,7 +108,7 @@ private size_t upperPowerOfTwo(size_t v) pure {
 	return v + 1;
 }
 
-/// The growth engine behind every function that adds elements: makes room for `newSize` elements, reallocating only if the capacity is short. `updateUtilized` raises the length to `newSize` (it never lowers it); `exactSizing` makes a reallocation exactly `newSize` rather than the next power of two. Returns a pointer to element `newSize - 1`, or null if the allocator refused or the new capacity's byte count would overflow, in which case `da` is unchanged.
+/// The growth engine behind every function that adds elements: makes room for `newSize` elements, reallocating only if the capacity is short. `updateUtilized` raises the length to `newSize` (it never lowers it); `exactSizing` makes a reallocation exactly `newSize` rather than the next power of two. Returns a pointer to element `newSize - 1`, or `da` itself when `newSize` is 0 since it then has no last element; returns null if the allocator refused or the new capacity's byte count would overflow, in which case `da` is unchanged.
 ///
 /// Examples:
 /// ---
@@ -113,6 +117,8 @@ private size_t upperPowerOfTwo(size_t v) pure {
 /// scope(exit) free(arr);
 /// assert(last is arr + 2);
 /// assert(length(arr) == 3 && capacity(arr) == 4);
+///
+/// assert(maybeGrow(arr, 0, false, true) is arr);
 /// ---
 package T* maybeGrow(T)(ref T* da, size_t newSize, bool updateUtilized, bool exactSizing) @trusted {
 	mixin fp.pointer.requireAlignable!T;
@@ -122,7 +128,7 @@ package T* maybeGrow(T)(ref T* da, size_t newSize, bool updateUtilized, bool exa
 		if (h.capacity >= newSize) {
 			if (updateUtilized)
 				h.base.size = h.base.size > newSize ? h.base.size : newSize;
-			return da + (newSize - 1);
+			return newSize == 0 ? da : da + (newSize - 1);
 		}
 	}
 
@@ -139,19 +145,20 @@ package T* maybeGrow(T)(ref T* da, size_t newSize, bool updateUtilized, bool exa
 	immutable oldSize = headerOf(da).base.size; // the zeroed dummy's for null
 	T* newData = cast(T*) fp.pointer.allocContainer!Header(bytes, fp.pointer.PointerType.dynarray);
 	if (newData is null) return null;
+	fp.lifecycle.initSlots(newData, newCapacity);
 	Header* newH = headerOf(newData);
 	newH.capacity = newCapacity;
 	newH.base.size = updateUtilized ? newSize : oldSize;
 	if (da !is null) {
-		core.stdc.string.memcpy(newData, da, T.sizeof * oldSize);
+		fp.lifecycle.moveRange(newData, da, oldSize);
 		cast(void)fp.pointer.allocFunction(headerOf(da), 0);
 	}
 	da = newData;
-	return da + (newSize - 1);
+	return newSize == 0 ? da : da + (newSize - 1);
 }
 
 
-/// Makes room for at least `size` elements without changing the length. Returns null if the allocator refused or `size` elements' byte count would overflow, leaving `da` unchanged.
+/// Makes room for at least `size` elements without changing the length. Returns null if the allocator refused or `size` elements' byte count would overflow, leaving `da` unchanged. Returns `da` itself when `size` is 0.
 ///
 /// Examples:
 /// ---
@@ -159,12 +166,14 @@ package T* maybeGrow(T)(ref T* da, size_t newSize, bool updateUtilized, bool exa
 /// assert(reserve(arr, 100) !is null);
 /// scope(exit) free(arr);
 /// assert(capacity(arr) == 100 && length(arr) == 0);
+///
+/// assert(reserve(arr, 0) is arr);
 /// ---
 T* reserve(T)(ref T* da, size_t size) {
 	return maybeGrow(da, size, false, true);
 }
 
-/// Grows `da` to at least `size` elements, reallocating to exactly `size` if it must reallocate at all. New elements are uninitialized. Returns a pointer to element `size - 1`, or null if the allocator refused or `size` elements' byte count would overflow, leaving `da` unchanged.
+/// Grows `da` to at least `size` elements, reallocating to exactly `size` if it must reallocate at all. New elements are uninitialized, or empty when the element type has a lifetime. Returns a pointer to element `size - 1`, or `da` itself when `size` is 0, or null if the allocator refused or `size` elements' byte count would overflow, leaving `da` unchanged.
 ///
 /// Examples:
 /// ---
@@ -173,12 +182,14 @@ T* reserve(T)(ref T* da, size_t size) {
 /// scope(exit) free(arr);
 /// assert(last is arr + 4);
 /// assert(length(arr) == 5 && capacity(arr) == 5);
+///
+/// assert(growToSize(arr, 0) is arr);
 /// ---
 T* growToSize(T)(ref T* da, size_t size) {
 	return maybeGrow(da, size, true, true);
 }
 
-/// Appends `toAdd` uninitialized elements, rounding any reallocation up to a power of two. Returns a pointer to the new last element, or null if the allocator refused or the new length would overflow, leaving `da` unchanged.
+/// Appends `toAdd` uninitialized elements, rounding any reallocation up to a power of two. Returns a pointer to the new last element, or null if the allocator refused or the new length would overflow, leaving `da` unchanged. With `toAdd` 0 nothing is appended, so a null `da` is left null and otherwise the last element is returned.
 ///
 /// Examples:
 /// ---
@@ -187,14 +198,18 @@ T* growToSize(T)(ref T* da, size_t size) {
 /// scope(exit) free(arr);
 /// *last = 9;
 /// assert(length(arr) == 3 && arr[2] == 9);
+///
+/// assert(grow(arr, 0) is arr + 2);
 /// ---
 T* grow(T)(ref T* da, size_t toAdd) {
 	bool overflow = false;
 	immutable newSize = core.checkedint.addu(length(da), toAdd, overflow);
-	return overflow ? null : maybeGrow(da, newSize, true, false);
+	if (overflow) return null;
+	if (newSize == 0) return da; // Nothing was appended, so there is no last element to point at.
+	return maybeGrow(da, newSize, true, false);
 }
 
-/// Appends `value`. Returns false if the array could not grow, leaving it unchanged.
+/// Appends `value`, taking its lifetime over: the copy of it made for the call is left empty. Returns false if the array could not grow, leaving it unchanged; the copy's lifetime is ended either way.
 ///
 /// Examples:
 /// ---
@@ -205,12 +220,12 @@ T* grow(T)(ref T* da, size_t toAdd) {
 /// ---
 bool pushBack(T)(ref T* da, T value) {
 	T* slot = maybeGrow(da, length(da) + 1, true, false);
-	if (slot is null) return false;
-	*slot = value;
+	if (slot is null) { fp.lifecycle.endLifetime(value); return false; }
+	fp.lifecycle.moveInto(*slot, value);
 	return true;
 }
 
-/// Inserts `count` uninitialized elements before element `pos`, returning a pointer to the first of them, or null if the array could not grow, leaving it unchanged.
+/// Inserts `count` elements before element `pos`, their bytes uninitialized when the element type's lifetime is its bytes and empty otherwise. `count` must be greater than zero and `pos` no greater than the length. Returns a pointer to the first of them, or null if the array could not grow, leaving it unchanged.
 ///
 /// Examples:
 /// ---
@@ -234,11 +249,16 @@ T* insertUninitialized(T)(ref T* da, size_t pos, size_t count) @trusted {
 	ubyte* oldStart = raw + pos * T.sizeof;
 	ubyte* newStart = oldStart + count * T.sizeof;
 	immutable bytesToMove = (raw + length(da) * T.sizeof) - newStart;
-	core.stdc.string.memmove(newStart, oldStart, bytesToMove);
+	static if (fp.lifecycle.isBitMoveable!T) core.stdc.string.memmove(newStart, oldStart, bytesToMove);
+	else {
+		for (size_t i = length(da) - count; i > pos; --i) // shifting up, so move from the back
+			fp.lifecycle.moveInto(da[i - 1 + count], da[i - 1]);
+		fp.lifecycle.initSlots(da + pos, count); // the gap holds no lifetime, so removing it later finalizes nothing
+	}
 	return cast(T*) oldStart;
 }
 
-/// Inserts `value` before element `pos`. Returns false if the array could not grow, leaving it unchanged.
+/// Inserts `value` before element `pos`. Returns false if the array could not grow, leaving it unchanged; `value`'s lifetime is taken over either way.
 ///
 /// Examples:
 /// ---
@@ -250,8 +270,8 @@ T* insertUninitialized(T)(ref T* da, size_t pos, size_t count) @trusted {
 /// ---
 bool insert(T)(ref T* da, size_t pos, T value) {
 	T* slot = insertUninitialized(da, pos, 1);
-	if (slot is null) return false;
-	*slot = value;
+	if (slot is null) { fp.lifecycle.endLifetime(value); return false; }
+	fp.lifecycle.moveInto(*slot, value);
 	return true;
 }
 
@@ -290,7 +310,7 @@ bool concatenate(T)(ref T* dest, inout(T)[] src) @trusted {
 	immutable ptrdiff_t selfOffset = overlaps(dest, src) ? src.ptr - dest : -1;
 	if (overflow || maybeGrow(dest, newSize, true, false) is null) return false;
 	const(T)* from = selfOffset >= 0 ? dest + selfOffset : src.ptr;
-	core.stdc.string.memcpy(dest + preSize, from, src.length * T.sizeof);
+	fp.lifecycle.copyRange(dest + preSize, cast(T*) from, src.length);
 	return true;
 }
 /// Ditto
@@ -299,13 +319,17 @@ bool concatenate(T)(ref T* dest, inout T* src) {
 }
 
 
-/// Allocates a dynarray of `size` uninitialized elements, with no spare capacity. Returns null if the allocator refused.
+/// Allocates a dynarray of `size` uninitialized elements, or empty ones when the element type has a lifetime, with no spare capacity. Returns null if the allocator refused. `size` 0 still allocates room for one element, so the result is a valid empty dynarray rather than null.
 ///
 /// Examples:
 /// ---
 /// int* arr = create!int(3);
 /// scope(exit) free(arr);
 /// assert(length(arr) == 3 && capacity(arr) == 3);
+///
+/// int* empty = create!int(0);
+/// scope(exit) free(empty);
+/// assert(length(empty) == 0 && capacity(empty) == 1);
 /// ---
 T* create(T)(size_t size) {
 	T* da = null;
@@ -313,7 +337,7 @@ T* create(T)(size_t size) {
 	return da;
 }
 
-/// Copies `src`'s elements into `dest`, with at least `src`'s capacity unless `shrink` is set or `src` is a fat pointer other than a dynarray. Returns false if `dest` could not be sized to hold them, leaving it unchanged.
+/// Copies `src`'s elements into `dest`, with at least `src`'s capacity unless `shrink` is set or `src` is a fat pointer other than a dynarray. Elements `dest` held past `src`'s length are dropped, their lifetimes ended. Returns false if `dest` could not be sized to hold them, leaving it unchanged.
 ///
 /// Examples:
 /// ---
@@ -329,11 +353,15 @@ T* create(T)(size_t size) {
 /// ---
 bool cloneTo(T)(ref T* dest, inout T* src, bool shrink = false) @trusted {
 	immutable srcLength = length(src);
+	immutable self = dest is src;
+	immutable previousSize = headerOf(dest).base.size;
 	// Only a dynarray has a capacity; any other fat pointer reports 0.
 	immutable newCapacity = shrink || capacity(src) < srcLength ? srcLength : capacity(src);
 	if (growToSize(dest, newCapacity) is null) return false;
-	core.stdc.string.memcpy(dest, src, srcLength * T.sizeof);
-	headerOf(dest).base.size = srcLength;
+	if (previousSize > srcLength) fp.lifecycle.endLifetimes(dest + srcLength, previousSize - srcLength);
+	headerOf(dest).base.size = srcLength; // `growToSize` raises the length to the capacity, which for a dynarray is usually more than the elements copied.
+	if (self) return true; // growing already moved the elements over
+	fp.lifecycle.copyRange(dest, cast(T*) src, srcLength);
 	return true;
 }
 
@@ -356,7 +384,7 @@ T* clone(T)(inout T* src) {
 	return result;
 }
 
-/// Frees dynarray `da`, which may be null but must not be another kind of fat pointer. The `ref` overload also sets `da` to null.
+/// Frees dynarray `da`, which may be null but must not be another kind of fat pointer, ending the lifetimes of its elements first. The `ref` overload also sets `da` to null.
 ///
 /// Examples:
 /// ---
@@ -373,11 +401,12 @@ void free(T)(ref T* da) @trusted {
 void free(T)(const T* da) @trusted {
 	if (da is null) return;
 	assert(valid(da));
+	fp.lifecycle.endLifetimes(cast(T*) da, length(da));
 	cast(void)fp.pointer.allocFunction(headerOf(da), 0);
 }
 
 
-/// Removes the last `count` elements, keeping their capacity. Returns a pointer to where the first of them was.
+/// Removes the last `count` elements, keeping their capacity, and ends their lifetimes. `count` must be no greater than the length. Returns a pointer to where the first of them was.
 ///
 /// Examples:
 /// ---
@@ -390,6 +419,7 @@ T* popBackCount(T)(T* da, size_t count) @trusted {
 	assert(count <= length(da));
 	Header* h = headerOf(da);
 	h.base.size = h.base.size <= count ? 0 : h.base.size - count;
+	fp.lifecycle.endLifetimes(da + h.base.size, count);
 	return da + h.base.size;
 }
 
@@ -407,7 +437,7 @@ T* popBack(T)(T* da) {
 	return popBackCount(da, 1);
 }
 
-/// Removes `count` elements starting at `start`, moving every later element down. With `matchCapacity`, it also reallocates so capacity equals the new length, or 1 if that is 0, since a zero-capacity empty dynarray is not `fp.pointer.valid`. Returns a pointer to element `start`, or null if that reallocation was refused, in which case the array is unchanged.
+/// Removes `count` elements starting at `start`, which must fit within the length, moving every later element down and ending the removed ones' lifetimes. With `matchCapacity`, it also reallocates so capacity equals the new length, or 1 if that is 0, since a zero-capacity empty dynarray is not `fp.pointer.valid`. Returns a pointer to element `start`, or null if that reallocation was refused, in which case the array is unchanged.
 ///
 /// Examples:
 /// ---
@@ -432,19 +462,24 @@ T* deleteRange(T)(ref T* da, size_t start, size_t count, bool matchCapacity = fa
 		T* newData = null;
 		if (growToSize(newData, newLength) is null) return null;
 
-		ubyte* newRaw = cast(ubyte*) newData;
-		ubyte* insertedStart = newRaw + start * T.sizeof;
-		if (oldStart != raw)
-			core.stdc.string.memcpy(newRaw, raw, insertedStart - newRaw);
-		core.stdc.string.memcpy(insertedStart, oldStart, bytesToMove);
-
-		// `headerOf(null)` is the shared dummy, not an allocation.
-		if (da !is null) cast(void)fp.pointer.allocFunction(headerOf(da), 0);
+		if (da !is null) {
+			fp.lifecycle.moveRange(newData, da, start);
+			fp.lifecycle.moveRange(newData + start, da + start + count, oldSize - start - count);
+			fp.lifecycle.endLifetimes(da + start, count); // the removed ones are dropped with the old block
+			// `headerOf(null)` is the shared dummy, not an allocation.
+			cast(void)fp.pointer.allocFunction(headerOf(da), 0);
+		}
 		da = newData;
-		newStart = insertedStart;
+		newStart = cast(ubyte*) da + start * T.sizeof;
 	} else if (count > 0) {
 		headerOf(da).base.size -= count;
-		core.stdc.string.memmove(newStart, oldStart, bytesToMove);
+		static if (fp.lifecycle.isBitMoveable!T) core.stdc.string.memmove(newStart, oldStart, bytesToMove);
+		else {
+			// Ending them first: only the first removed slot is a shift destination, so the rest would otherwise be zeroed with their lifetimes still running.
+			fp.lifecycle.endLifetimes(da + start, count);
+			for (size_t i = start; i < oldSize - count; ++i) // shifting down, so move from the front
+				fp.lifecycle.moveInto(da[i], da[i + count]);
+		}
 	}
 
 	return cast(T*) newStart;
@@ -465,7 +500,7 @@ T* removeAt(T)(ref T* da, size_t pos) {
 	return deleteRange(da, pos, 1, false);
 }
 
-/// Sets the length to 0, keeping the capacity.
+/// Sets the length to 0, keeping the capacity and ending the elements' lifetimes.
 ///
 /// Examples:
 /// ---
@@ -475,6 +510,7 @@ T* removeAt(T)(ref T* da, size_t pos) {
 /// assert(length(arr) == 0 && capacity(arr) == 4);
 /// ---
 void clear(T)(T* da) @trusted {
+	fp.lifecycle.endLifetimes(da, length(da));
 	headerOf(da).base.size = 0;
 }
 
@@ -493,7 +529,7 @@ T* shrinkToFit(T)(ref T* da) {
 }
 
 
-/// Swaps the `count` elements starting at `start1` with the `count` starting at `start2`; the ranges must not overlap. Returns false if the scratch buffer the swap needs could not be allocated, leaving both untouched.
+/// Swaps the `count` elements starting at `start1` with the `count` starting at `start2`; both ranges must lie within the length and must not overlap. Returns false if the scratch buffer the swap needs could not be allocated, leaving both untouched.
 ///
 /// Examples:
 /// ---
@@ -510,17 +546,19 @@ bool swapRange(T)(T* da, size_t start1, size_t start2, size_t count) @trusted {
 	if (start1 == start2 || count == 0) return true;
 	assert(start1 + count <= start2 || start2 + count <= start1);
 
-	immutable bytes = count * T.sizeof;
-	ubyte* scratch = cast(ubyte*) fp.pointer.allocFunction(null, bytes);
-	if (scratch is null) return false;
+	static if (fp.lifecycle.isBitMoveable!T) {
+		immutable bytes = count * T.sizeof;
+		ubyte* scratch = cast(ubyte*) fp.pointer.allocFunction(null, bytes);
+		if (scratch is null) return false;
 
-	ubyte* a = cast(ubyte*)(da + start1);
-	ubyte* b = cast(ubyte*)(da + start2);
-	core.stdc.string.memcpy(scratch, a, bytes);
-	core.stdc.string.memcpy(a, b, bytes);
-	core.stdc.string.memcpy(b, scratch, bytes);
+		ubyte* a = cast(ubyte*)(da + start1);
+		ubyte* b = cast(ubyte*)(da + start2);
+		core.stdc.string.memcpy(scratch, a, bytes);
+		core.stdc.string.memcpy(a, b, bytes);
+		core.stdc.string.memcpy(b, scratch, bytes);
 
-	cast(void)fp.pointer.allocFunction(scratch, 0);
+		cast(void)fp.pointer.allocFunction(scratch, 0);
+	} else foreach (i; 0 .. count) fp.lifecycle.swapInto(da[start1 + i], da[start2 + i]);
 	return true;
 }
 
@@ -614,6 +652,37 @@ version(unittest) {
 	package void endPoisoningAllocator(fp.pointer.AllocFunction previous) {
 		fp.pointer.allocFunction = previous;
 	}
+
+	private __gshared fp.pointer.AllocFunction dirtyUnderlying;
+
+	private void* dirtyAlloc(void* p, size_t size) {
+		void* block = dirtyUnderlying(p, size);
+		if (p is null && block !is null) core.stdc.string.memset(block, 0x55, size);
+		return block;
+	}
+
+	/// For tests of uninitialized memory: `beginDirtyAllocator` makes `fp.pointer.allocFunction` fill every newly allocated block with `0x55` bytes, so a container that leaves a slot unset reads garbage rather than the zeros a fresh page usually has; `endDirtyAllocator` restores the allocator it returned.
+	///
+	/// Examples:
+	/// ---
+	/// auto previous = beginDirtyAllocator();
+	/// scope(exit) endDirtyAllocator(previous);
+	/// int* arr = create!int(1);
+	/// scope(exit) free(arr);
+	/// assert(arr[0] == 0x55555555);
+	/// ---
+	package fp.pointer.AllocFunction beginDirtyAllocator() {
+		dirtyUnderlying = fp.pointer.allocFunction;
+		fp.pointer.allocFunction = &dirtyAlloc;
+		return dirtyUnderlying;
+	}
+
+	/// Ditto
+	package void endDirtyAllocator(fp.pointer.AllocFunction previous) {
+		fp.pointer.allocFunction = previous;
+	}
+
+	private __gshared size_t finalizeCount;
 }
 
 
@@ -637,6 +706,19 @@ unittest {
 	assert(capacity(arr) == 20);
 	assert(length(arr) == 0);
 
+	// A zero size has no last element to point at, so the array itself is returned rather than one slot before its start.
+	assert(reserve(arr, 0) is arr && growToSize(arr, 0) is arr && grow(arr, 0) is arr);
+	assert(maybeGrow(arr, 0, true, false) is arr && length(arr) == 0);
+
+	// Nothing appended means nothing allocated: a null array stays null rather than getting a first page.
+	int* untouched = null;
+	assert(grow(untouched, 0) is null && untouched is null);
+
+	int* zeroed = create!int(0);
+	assert(zeroed !is null);
+	scope(exit) free(zeroed);
+	assert(length(zeroed) == 0 && capacity(zeroed) == 1);
+
 	assert(pushBack(arr, 5));
 	assert(pushFront(arr, 6));
 	assert(pushBack(arr, 7));
@@ -658,6 +740,9 @@ unittest {
 	scope(exit) free(copy);
 	assert(cloneTo(copy, arr));
 	assert(copy != arr && capacity(copy) == 20 && slice(copy) == [7, 6, 8]);
+
+	// Cloning into itself keeps the elements it had, not the spare capacity the grow rounded up to.
+	assert(cloneTo(arr, arr) && length(arr) == 3 && capacity(arr) == 20 && slice(arr) == [7, 6, 8]);
 
 	int* cloned = clone(arr);
 	scope(exit) free(cloned);
@@ -713,6 +798,9 @@ unittest {
 	scope(exit) free(fromHeap);
 	assert(cloneTo(fromHeap, heap));
 	assert(length(fromHeap) == 10 && capacity(fromHeap) == 10 && fromHeap[9] == 4);
+
+	// Checking a dynarray handle against a heap pointer reads only the shared 16-byte header; this module's larger header would overrun a foreign allocation.
+	assert(!validDynarray(heap) && capacity(heap) == 0 && length(heap) == 10);
 
 	// Appending an array to itself must read it from where growing moved it, not the freed block.
 	auto previous = beginPoisoningAllocator();
@@ -789,4 +877,82 @@ unittest {
 	assert(existing[0] == 11 && existing[1] == 22); // Refused, not half-swapped.
 	assert(swap(existing, 0, 1));
 	assert(existing[0] == 22 && existing[1] == 11);
+}
+
+unittest {
+	static struct Handle {
+		int* data;
+		void finalize() @nogc nothrow { if (data !is null) ++finalizeCount; data = null; }
+		void moveTo(ref Handle dest) @nogc nothrow { dest.data = data; data = null; }
+		void copyTo(ref Handle dest) @nogc nothrow { dest.data = data; }
+	}
+
+	static assert(fp.lifecycle.isBitMoveable!int && !fp.lifecycle.isBitMoveable!Handle);
+
+	Handle* arr = null;
+	scope(exit) free(arr);
+	finalizeCount = 0;
+
+	assert(pushBack(arr, Handle(cast(int*) 1)) && pushBack(arr, Handle(cast(int*) 2)));
+	assert(length(arr) == 2 && arr[1].data == cast(int*) 2 && finalizeCount == 0);
+
+	// Growing moves the elements without ending their lifetimes.
+	assert(reserve(arr, 100) !is null && length(arr) == 2 && arr[0].data == cast(int*) 1 && finalizeCount == 0);
+
+	assert(insertUninitialized(arr, 1, 1) !is null);
+	assert(arr[1].data is null); // the gap is left empty, so removing it without filling it finalizes nothing
+	arr[1].data = cast(int*) 3;
+	assert(length(arr) == 3 && arr[0].data == cast(int*) 1 && arr[1].data == cast(int*) 3 && arr[2].data == cast(int*) 2);
+
+	assert(deleteRange(arr, 0, 1) !is null);
+	assert(finalizeCount == 1 && arr[0].data == cast(int*) 3 && arr[1].data == cast(int*) 2);
+
+	assert(swap(arr, 0, 1));
+	assert(arr[0].data == cast(int*) 2 && arr[1].data == cast(int*) 3);
+
+	// With `matchCapacity`, `deleteRange` reallocates, so the removed element's lifetime ends as its block is freed.
+	assert(deleteRange(arr, 0, 1, true) !is null);
+	assert(finalizeCount == 2 && length(arr) == 1 && arr[0].data == cast(int*) 3);
+
+	// A middle range of more than one element: only the first removed slot is a shift destination.
+	assert(pushBack(arr, Handle(cast(int*) 4)) && pushBack(arr, Handle(cast(int*) 5)) && pushBack(arr, Handle(cast(int*) 6)));
+	assert(deleteRange(arr, 1, 2) !is null);
+	assert(finalizeCount == 4 && length(arr) == 2 && arr[0].data == cast(int*) 3 && arr[1].data == cast(int*) 6);
+
+	Handle* copy = null;
+	scope(exit) free(copy);
+	assert(cloneTo(copy, arr));
+	assert(length(copy) == 2 && copy[0].data == cast(int*) 3 && copy[1].data == cast(int*) 6);
+
+	// Cloning into an array longer than the source drops the extra elements, ending their lifetimes.
+	Handle* longer = null;
+	scope(exit) free(longer);
+	assert(pushBack(longer, Handle(cast(int*) 7)) && pushBack(longer, Handle(cast(int*) 8)) && pushBack(longer, Handle(cast(int*) 9)));
+	assert(cloneTo(longer, arr));
+	assert(length(longer) == 2 && longer[0].data == cast(int*) 3 && longer[1].data == cast(int*) 6 && finalizeCount == 7);
+
+	assert(popBackCount(arr, 1) is arr + 1);
+	assert(finalizeCount == 8 && arr[0].data == cast(int*) 3);
+
+	clear(arr);
+	assert(finalizeCount == 9 && length(arr) == 0);
+
+	free(arr); // every slot was already empty
+	assert(finalizeCount == 9);
+
+	// A refused append ends the value's lifetime, since the call took it over.
+	finalizeCount = 0;
+	Handle* tight = create!Handle(1);
+	assert(tight !is null && pushBack(tight, Handle(cast(int*) 5)));
+	auto rationed = beginRationedAllocator();
+	assert(!pushBack(tight, Handle(cast(int*) 4)) && finalizeCount == 1 && length(tight) == 2);
+	endRationedAllocator(rationed);
+	assert(insert(tight, 1, Handle(cast(int*) 6)) && length(tight) == 3);
+
+	// The `matchCapacity` path reallocates, so a middle range's lifetimes end before the old block is freed.
+	assert(deleteRange(tight, 1, 1, true) !is null);
+	assert(finalizeCount == 2 && length(tight) == 2 && tight[0].data is null && tight[1].data == cast(int*) 5);
+
+	free(tight);
+	assert(finalizeCount == 3 && tight is null);
 }

@@ -1,4 +1,4 @@
-/// libfp: fat pointers and the containers built on them, for `-betterC` D. `import fp;` pulls in every module; each can also be imported on its own. The modules reuse function names (`length`, `free`, ...), so code that imports several of them calls through the module name.
+/// libfp: fat pointers and the containers built on them, for `-betterC` D. `import fp;` pulls in every module; each can also be imported on its own. Several modules define the same names — `capacity`, `clear`, `clone`, `concatenate`, `contains`, `create`, `empty`, `find`, `free`, `grow`, `insert`, `length`, `popBack`, `popBackCount`, `pushBack`, `reserve`, `shrinkToFit`, `size`, `swap`, `valid` — so an unqualified call to one of them is ambiguous and must be qualified with its module.
 ///
 /// Examples:
 /// ---
@@ -15,6 +15,7 @@
 module fp;
 
 public import fp.pointer;
+public import fp.lifecycle;
 public import fp.dynarray;
 public import fp.pagedarray;
 public import fp.fnv1a;
