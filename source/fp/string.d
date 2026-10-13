@@ -129,11 +129,11 @@ private enum bool isSliceArg(T) = isStringLike!T && !is(T : const(char)*);
 
 private alias aliasSeq(T...) = T;
 
-// `Args` with each slice replaced by the C string `format` passes in its place.
+// `Args` with each slice replaced by the C string `format` passes in its place, and top-level qualifiers dropped so the copies can be assigned.
 private template cArgTypes(Args...) {
 	static if (Args.length == 0) alias cArgTypes = Args;
 	else static if (isSliceArg!(Args[0])) alias cArgTypes = aliasSeq!(const(char)*, cArgTypes!(Args[1 .. $]));
-	else alias cArgTypes = aliasSeq!(Args[0], cArgTypes!(Args[1 .. $]));
+	else alias cArgTypes = aliasSeq!(typeof(cast() Args[0].init), cArgTypes!(Args[1 .. $]));
 }
 
 private extern (C) char* formatC(const char* fmt, ...) @trusted {
@@ -810,6 +810,12 @@ unittest {
 	scope(exit) free(fmtSlices);
 	assert(equal(fmtSlices, "Hello World!"));
 	assert(format("%s", "") is null && format("") is null);
+	const size_t constNumber = 7;
+	immutable(char)* immutablePtr = "imm".ptr;
+	const char* constPtr = "c".ptr;
+	char* fmtQualified = format("%03zu %s %s", constNumber, immutablePtr, constPtr);
+	scope(exit) free(fmtQualified);
+	assert(equal(fmtQualified, "007 imm c"));
 }
 
 unittest {
