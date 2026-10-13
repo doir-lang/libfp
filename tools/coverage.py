@@ -24,7 +24,11 @@ def describe(*args):
 def relative_to_root(path):
 	"""-cov names each .lst after the source path it was given, so libfp's own paths go relative to the root: identical names on every platform."""
 	path = os.path.normpath(path)
-	inside = os.path.commonpath([root, os.path.abspath(path)]) == root
+	try:
+		inside = os.path.commonpath([root, os.path.abspath(path)]) == root
+	except ValueError:
+		# Windows raises this for paths on different drives, which cannot share a root.
+		inside = False
 	return os.path.relpath(path, root) if inside else path
 
 
