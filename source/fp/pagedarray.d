@@ -546,7 +546,7 @@ unittest {
 
 	static assert(!fp.lifecycle.isBitMoveable!Handle);
 
-	PagedArrayOf!Handle arr = create!Handle(16); // two elements per page
+	PagedArrayOf!Handle arr = create!Handle(2 * Handle.sizeof); // two elements per page
 	scope(exit) free(arr);
 	finalizeCount = 0;
 
@@ -579,7 +579,7 @@ unittest {
 	finalizeCount = 0;
 	auto dirty = fp.dynarray.beginDirtyAllocator();
 	scope(exit) fp.dynarray.endDirtyAllocator(dirty);
-	PagedArrayOf!Handle raw = create!Handle(16);
+	PagedArrayOf!Handle raw = create!Handle(2 * Handle.sizeof);
 	assert(grow(raw, 3) !is null && length(raw) == 3);
 	assert(raw[0].data is null && raw[2].data is null);
 	free(raw);
@@ -587,7 +587,7 @@ unittest {
 
 	// A refused append ends the value's lifetime, since the call took it over.
 	finalizeCount = 0;
-	PagedArrayOf!Handle tight = create!Handle(16);
+	PagedArrayOf!Handle tight = create!Handle(2 * Handle.sizeof);
 	assert(pushBack(tight, Handle(cast(int*) 5)) && pushBack(tight, Handle(cast(int*) 6)));
 	rationed = fp.dynarray.beginRationedAllocator(0);
 	assert(!pushBack(tight, Handle(cast(int*) 7)) && finalizeCount == 1);
