@@ -53,33 +53,22 @@ private void* moveSlot(T)(void* dest, inout(void)* src, size_t n) @trusted {
 }
 
 
-// Struct keys can hold garbage in the bytes between their fields, so two keys with the same fields may hash differently.
-private void markField(T, string name)(ref T key, ubyte* field) @trusted {
-	ubyte* raw = cast(ubyte*)&key;
-	ubyte* member = cast(ubyte*)&__traits(getMember, key, name);
-	if (member < raw || member >= raw + T.sizeof) return; // a method or static member, not a field
-	immutable start = cast(size_t)(member - raw);
-	for (size_t i = start; i < start + __traits(getMember, key, name).sizeof; ++i)
-		field[i] = 1;
-}
-
+// Struct keys can hold garbage in the bytes between their fields, so two keys with the same fields may hash differently. `tupleof` lists fields only, never methods, accessors, aliases or imports.
 private void normalizePadding(T)(ref T key) @trusted {
 	static if (is(T == struct)) {
 		ubyte* raw = cast(ubyte*)&key;
 		ubyte[T.sizeof] field;
-		static foreach (name; __traits(allMembers, T))
-			// A method has no size, so it is not a field whose padding needs zeroing.
-			static if (__traits(compiles, cast(ubyte*)&__traits(getMember, key, name)) && __traits(compiles, typeof(__traits(getMember, key, name)).sizeof))
-				markField!(T, name)(key, field.ptr);
+		static foreach (i; 0 .. T.tupleof.length)
+			field[T.tupleof[i].offsetof .. T.tupleof[i].offsetof + typeof(T.tupleof[i]).sizeof] = 1;
 		for (size_t i = 0; i < T.sizeof; ++i)
 			if (!field[i]) raw[i] = 0;
-		static foreach (name; __traits(allMembers, T)) {{
-			alias member = typeof(__traits(getMember, key, name));
-			static if (is(member == struct))
-				normalizePadding(__traits(getMember, key, name));
-			else static if (__traits(compiles, member.length))
-				for (size_t i = 0; i < __traits(getMember, key, name).length; ++i)
-					normalizePadding(__traits(getMember, key, name)[i]);
+		static foreach (i; 0 .. T.tupleof.length) {{
+			alias Member = typeof(T.tupleof[i]);
+			static if (is(Member == struct))
+				normalizePadding(key.tupleof[i]);
+			else static if (__traits(isStaticArray, Member))
+				foreach (ref element; key.tupleof[i])
+					normalizePadding(element);
 		}}
 	}
 }
@@ -700,6 +689,24 @@ unittest {
 	other.items[0].pad = 1; other.items[0].key = 2; other.items[1].pad = 3; other.items[1].key = 4;
 	Pair* held = insert(pairs, one);
 	assert(held !is null && insert(pairs, other) is held && find(pairs, other) is held);
+
+	// A key whose members include a type alias, an import and a ref accessor still hashes by its fields alone.
+	static struct Aliased {
+		static import core.stdc.string;
+		alias Slot = int;
+		char pad;
+		Slot key;
+		@property ref inout(Slot) slot() inout return @nogc nothrow { return key; }
+	}
+	Aliased* aliased = create!Aliased();
+	assert(aliased !is null);
+	scope(exit) free(aliased);
+	Aliased left, right;
+	core.stdc.string.memset(cast(ubyte*)&left, 0xAA, Aliased.sizeof);
+	core.stdc.string.memset(cast(ubyte*)&right, 0xBB, Aliased.sizeof);
+	left.pad = right.pad = 1;
+	left.slot = right.slot = 2;
+	assert(insert(aliased, left) is find(aliased, right));
 }
 
 unittest {
