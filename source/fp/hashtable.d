@@ -1,4 +1,4 @@
-/// A hopscotch-hashing, open-addressing hash set on top of `fp.dynarray`. A table is a plain `T*` to its slots, so it indexes like any fat pointer; every key sits within `Config.neighborhoodSize` slots of the slot its hash selects.
+/// A hopscotch-hashing, open-addressing hash set on top of `fp.dynarray`. A table is a plain `T*` to its slots, so it indexes like any fat pointer; every key sits within `Config.neighborhoodSize` slots of the slot its hash selects. An insert whose neighborhood is full moves other keys, each within its own neighborhood, to free a slot in it, and grows the table only when no such moves exist; so an insert may move keys, and a pointer into the table lasts only until the next insert.
 ///
 /// Keys are compared and hashed by their bytes unless `Config` says otherwise. A key type that declares a lifetime (see `fp.lifecycle`) is moved into its slot and finalized when it is removed or the table freed, unless the config names other functions. Keys are passed by value: `insert` and `insertAssumeUnique` take over the copy they are given, moving it into the table or ending it when it is not stored, while `find`, `contains` and `remove` leave the caller's key alone and end only the copy they make to read it. An owning key type should end its lifetime with `finalize` rather than `~this`, since a `~this` would run on the copy every call makes. A key type whose `this(this)` postblit changes its bytes, as a deep copy does, cannot be looked up by value, since the copy every call makes is no longer byte-equal to the stored key; such a type needs a `Config` with a `hashFunction` and `equalFunction` that read its contents. A null `T*` is not a table: make one with `create`.
 ///
@@ -89,7 +89,7 @@ struct Config {
 	CopyFunction copyFunction = &defaultCopy; /// `memcpy` by default; `create!T` replaces it with a move for a key type that declares a lifetime.
 	FinalizeFunction finalizeFunction = null; /// Called on each key removed or freed with the table; null for none. `create!T` sets it for key types that declare a lifetime.
 	size_t baseSize = 8; /// The number of slots `create` allocates, which must be greater than zero.
-	size_t neighborhoodSize = 8; /// How far past its home slot a key may sit: from 1 to `maxNeighborhoodSize`.
+	size_t neighborhoodSize = maxNeighborhoodSize; /// How far past its home slot a key may sit: from 1 to `maxNeighborhoodSize`. The widest lets a table fill to about 90% before it grows; 8 grows it at about half.
 	size_t maxFailRetries = 8; /// How many times one insert may grow the table before giving up.
 }
 
@@ -139,20 +139,56 @@ private size_t computeHash(inout void* table, inout(ubyte)[] key) @trusted {
 	return headerOf(table).config.hashFunction(key) % fp.pointer.length(table);
 }
 
-private size_t findEmptyHashPosition(inout void* table, size_t hash) @trusted {
+private size_t hashDistance(inout void* table, size_t hash, size_t position) @trusted {
+	immutable size = fp.pointer.length(table);
+	return position < hash ? size - hash + position : position - hash;
+}
+
+// How far past its home an insert looks for a free slot to hop back into its neighborhood; beyond it the table grows.
+private enum size_t maxProbe = 1024;
+
+// A free slot in `hash`'s neighborhood, or `fp.pointer.notFound`. When the nearest free slot is beyond it, keys of `keySize` bytes nearer their own homes hop into it, moving it back, as hopscotch hashing does.
+private size_t findEmptyHashPosition(void* table, size_t hash, size_t keySize) @trusted {
 	immutable neighborhoodSize = headerOf(table).config.neighborhoodSize;
 	immutable size = fp.pointer.length(table);
-	foreach (i; 0 .. neighborhoodSize) {
+	immutable reach = neighborhoodSize < size ? neighborhoodSize : size;
+	foreach (i; 0 .. reach) {
 		immutable probe = (hash + i) % size;
 		if (!entryOccupied(table, probe))
 			return probe;
 	}
-	return fp.pointer.notFound;
-}
+	if (neighborhoodSize >= size) return fp.pointer.notFound;
 
-private size_t hashDistance(inout void* table, size_t hash, size_t position) @trusted {
-	immutable size = fp.pointer.length(table);
-	return position < hash ? size - hash + position : position - hash;
+	size_t free = fp.pointer.notFound;
+	foreach (i; reach .. (size < maxProbe ? size : maxProbe)) {
+		immutable probe = (hash + i) % size;
+		if (entryOccupied(table, probe)) continue;
+		free = probe;
+		break;
+	}
+	if (free == fp.pointer.notFound) return fp.pointer.notFound;
+	ubyte* tableP = cast(ubyte*) table;
+	while (hashDistance(table, hash, free) >= neighborhoodSize) {
+		// The farthest-back home within reach of `free` with a key before it: moving that key frees the earliest slot.
+		size_t from = fp.pointer.notFound;
+		foreach_reverse (back; 1 .. neighborhoodSize) {
+			immutable home = (free + size - back) % size;
+			immutable info = *entryInfoPtr(table, home);
+			foreach (i; 0 .. back) {
+				if ((info & (size_t(1) << i)) == 0) continue;
+				from = (home + i) % size;
+				core.stdc.string.memcpy(tableP + free * keySize, tableP + from * keySize, keySize);
+				*entryInfoPtr(table, home) = (info & ~(size_t(1) << i)) | (size_t(1) << back);
+				setEntryOccupied(table, free, true);
+				setEntryOccupied(table, from, false);
+				break;
+			}
+			if (from != fp.pointer.notFound) break;
+		}
+		if (from == fp.pointer.notFound) return fp.pointer.notFound;
+		free = from;
+	}
+	return free;
 }
 
 
@@ -256,7 +292,7 @@ void free(T)(ref T* table) {
 private void* insertImpl(T)(ref T* table, inout(ubyte)[] key, size_t failures, CopyFunction place) @trusted {
 	assert(validHashtable(table), "fp.hashtable: not a table; make one with create");
 	immutable hash = computeHash(table, key);
-	immutable position = findEmptyHashPosition(table, hash);
+	immutable position = findEmptyHashPosition(table, hash, key.length);
 
 	if (position == fp.pointer.notFound) {
 		if (failures >= headerOf(table).config.maxFailRetries)
@@ -351,7 +387,7 @@ private T* insertUnique(T)(ref T* table, ref T key) @trusted {
 	return stored;
 }
 
-/// Inserts `key` without checking whether it is already present, so a duplicate is stored twice. Returns a pointer to the stored key, or null if the table could not make room, in which case it holds the same keys as before, though it may have grown. Either way the call takes over `key`'s lifetime: the copy made for it is moved into the table, or ended when it is not stored.
+/// Inserts `key` without checking whether it is already present, so a duplicate is stored twice. Returns a pointer to the stored key, valid until the next insert, or null if the table could not make room, in which case it holds the same keys as before, though it may have grown. Either way the call takes over `key`'s lifetime: the copy made for it is moved into the table, or ended when it is not stored.
 ///
 /// Examples:
 /// ---
@@ -407,7 +443,7 @@ size_t findPosition(T)(inout T* table, const(T) key) @trusted {
 	return findPositionOf(table, *cast(T*)&key); // the call's own copy, so writing to it and ending it is safe
 }
 
-/// A pointer to the stored copy of `key`, or null if it is absent. Changing the key through it so that it hashes differently corrupts the table. The call takes over the lifetime of the copy made for it, leaving the caller's key alone.
+/// A pointer to the stored copy of `key`, valid until the next insert, or null if it is absent. Changing the key through it so that it hashes differently corrupts the table. The call takes over the lifetime of the copy made for it, leaving the caller's key alone.
 ///
 /// Examples:
 /// ---
@@ -422,7 +458,7 @@ T* find(T)(T* table, const(T) key) @trusted {
 	return pos == fp.pointer.notFound ? null : table + pos;
 }
 
-/// Finds `key`, inserting it if it is not already present. Returns a pointer to the stored key, or null if the table could not make room, in which case it holds the same keys as before, though it may have grown. Either way the call takes over `key`'s lifetime: the copy made for it is moved into the table, or ended when it is already there or cannot be stored.
+/// Finds `key`, inserting it if it is not already present. Returns a pointer to the stored key, valid until the next insert, or null if the table could not make room, in which case it holds the same keys as before, though it may have grown. Either way the call takes over `key`'s lifetime: the copy made for it is moved into the table, or ended when it is already there or cannot be stored.
 ///
 /// Examples:
 /// ---
@@ -567,6 +603,12 @@ version(unittest) {
 
 	private size_t parityHash(inout(ubyte)[] data) {
 		return identityHash(data) & 1;
+	}
+
+	// `identityHash` until set, then sends every key home to slot 0.
+	private __gshared bool collapseHashes;
+	private size_t collapsibleHash(inout(ubyte)[] data) {
+		return collapseHashes ? 0 : identityHash(data);
 	}
 }
 
@@ -765,7 +807,7 @@ unittest {
 }
 
 unittest {
-	// 15 wrapped into slot 0 from home 7, so slot-order reinsertion places it at 7 first, and 7 then has no room or retries left.
+	// 15 wrapped into slot 0 from home 7, so slot-order reinsertion places it at 7 first; 7 then wraps to slot 0 only by hopping 0 on to slot 1.
 	Config cfg;
 	cfg.hashFunction = &identityHash;
 	cfg.neighborhoodSize = 2;
@@ -776,8 +818,8 @@ unittest {
 	foreach (k; [7, 15, 0])
 		assert(insert(wrapped, k) !is null);
 
-	assert(rehash(wrapped, 0) == 7);
-	assert(capacity(wrapped) == 8);
+	assert(rehash(wrapped, 0) == fp.pointer.notFound);
+	assert(capacity(wrapped) == 8 && wrapped[0] == 7 && wrapped[1] == 0 && wrapped[7] == 15);
 	foreach (k; [7, 15, 0])
 		assert(contains(wrapped, k));
 
@@ -794,6 +836,22 @@ unittest {
 	assert(insert(crowded, 3) is null);
 	foreach (k; [0, 2, 4, 6, 1])
 		assert(contains(crowded, k));
+
+	// A key the fresh table cannot place fails the rehash with its slot, and the table keeps its keys where they were.
+	cfg.hashFunction = &collapsibleHash;
+	cfg.neighborhoodSize = 1;
+	cfg.maxFailRetries = 0;
+	int* homed = create!int(cfg);
+	assert(homed !is null);
+	scope(exit) free(homed);
+	foreach (k; [0, 1, 2])
+		assert(insert(homed, k) !is null);
+	collapseHashes = true;
+	immutable stuck = rehash(homed, 0);
+	collapseHashes = false;
+	assert(stuck == 1 && homed[0] == 0 && homed[1] == 1 && homed[2] == 2);
+	foreach (k; [0, 1, 2])
+		assert(contains(homed, k));
 }
 
 unittest {
@@ -935,21 +993,22 @@ unittest {
 		int id;
 		int* data;
 		void finalize() @nogc nothrow { if (data !is null) ++finalizeCallCount; data = null; }
-		void copyTo(ref ClonedKey dest) @nogc nothrow { dest.id = id + 8; dest.data = cast(int*) 1; }
+		// Every copy hashes home to slot 0, where a neighborhood of one slot holds only one of them.
+		void copyTo(ref ClonedKey dest) @nogc nothrow { dest.id = 0; dest.data = cast(int*) 1; }
 	}
 	Config colliding;
 	colliding.hashFunction = &identityHash;
-	colliding.neighborhoodSize = 2;
+	colliding.neighborhoodSize = 1;
 	colliding.maxFailRetries = 0;
 	ClonedKey* crowded = create!ClonedKey(colliding);
 	assert(crowded !is null);
-	foreach (id; [7, 15, 0])
+	foreach (id; [1, 2, 3])
 		assert(insert(crowded, ClonedKey(id, cast(int*) 1)) !is null);
 	finalizeCallCount = 0;
 	assert(clone(crowded) is null);
-	assert(finalizeCallCount == 3); // the two copies the fresh table took, and the one it had no room for
+	assert(finalizeCallCount == 2); // the copy the fresh table took, and the one it had no room for
 	free(crowded);
-	assert(finalizeCallCount == 6 && crowded is null);
+	assert(finalizeCallCount == 5 && crowded is null);
 
 	// A key the table does not keep — already there, or no room for it — has its lifetime ended by the call.
 	finalizeCallCount = 0;
@@ -964,4 +1023,39 @@ unittest {
 	fp.dynarray.endRationedAllocator(rationed);
 	free(tight);
 	assert(finalizeCallCount == 3);
+}
+
+unittest {
+	// Hopscotch displacement: with the default neighborhood a table is mostly full before it grows, and keys stay findable through interleaved inserts and removals that move them.
+	ulong* table = create!ulong();
+	assert(table !is null);
+	scope(exit) free(table);
+	size_t slots = capacity(table);
+	foreach (ulong k; 0 .. 1 << 15) {
+		assert(insert(table, k * 0x9E3779B97F4A7C15) !is null);
+		if (capacity(table) == slots) continue;
+		assert(slots < 1024 || k >= slots * 4 / 5);
+		slots = capacity(table);
+	}
+
+	enum n = 4096;
+	bool[n] present;
+	ulong* churn = create!ulong();
+	assert(churn !is null);
+	scope(exit) free(churn);
+	uint seed = 1;
+	foreach (step; 0 .. 20 * n) {
+		seed = seed * 1103515245 + 12345;
+		immutable k = (seed >> 8) % n;
+		if (present[k] && step % 3 == 0) {
+			remove(churn, cast(ulong) k);
+			present[k] = false;
+		} else {
+			assert(insert(churn, cast(ulong) k) !is null);
+			present[k] = true;
+		}
+		if (step % 512 == 0)
+			foreach (ulong j; 0 .. n) assert(contains(churn, j) == present[j]);
+	}
+	foreach (ulong j; 0 .. n) assert(contains(churn, j) == present[j]);
 }
