@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Builds the unittests for wasm32-wasi and runs them in a browser, or headlessly under Node, through @tybys/wasm-util's WASI and @emnapi/wasi-threads.
+"""Builds the unittests for wasm32-wasi with threads and runs them in a browser, or headlessly under Node, through @tybys/wasm-util's WASI and @emnapi/wasi-threads.
 
 The build links against a wasi-sdk sysroot and compiler-rt builtins, downloaded once into bin/wasi-sdk unless WASI_SYSROOT and WASI_BUILTINS name local copies. It links with `wasm-ld` from PATH (or WASM_LD), falling back to LDC's internal linker.
 
@@ -19,7 +19,9 @@ wasm = os.path.join(out, 'libfp-tests.wasm')
 
 sdkVersion = '34'
 release = f'https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-{sdkVersion}/'
-target = 'wasm32-wasip1'
+target = 'wasm32-wasip1-threads'
+# Must match maximumPages in tests/wasi/main.mjs, which creates the shared memory the module imports.
+maxMemory = 16384 * 65536
 packages = ['@tybys/wasm-util@0.10.4', '@emnapi/wasi-threads@2.2.0']
 
 
@@ -40,15 +42,18 @@ def fetch(name):
 def build():
 	sysroot = os.environ.get('WASI_SYSROOT') or fetch(f'wasi-sysroot-{sdkVersion}.0')
 	builtins = os.environ.get('WASI_BUILTINS') or os.path.join(
-		fetch(f'libclang_rt-{sdkVersion}.0'), 'wasm32-unknown-wasip1', 'libclang_rt.builtins.a')
+		fetch(f'libclang_rt-{sdkVersion}.0'), 'wasm32-unknown-wasip1-threads', 'libclang_rt.builtins.a')
 	libs = os.path.join(sysroot, 'lib', target)
 
 	sources = [os.path.join('source', 'fp', f) for f in sorted(os.listdir(os.path.join(root, 'source', 'fp'))) if f.endswith('.d')]
 	os.makedirs(out, exist_ok=True)
-	compile = [compiler, '-mtriple=wasm32-unknown-wasi', '-betterC', '-checkaction=C', '-unittest',
+	compile = [compiler, '-mtriple=wasm32-unknown-wasi', '-mattr=+atomics,+bulk-memory', '-betterC', '-checkaction=C', '-unittest',
 		'-Isource', '-Itests', '-od=' + out, *sources, os.path.join('tests', 'runner.d')]
 	# The long-double archive replaces libc's printf, so it must come first; D's `real` is a 128-bit long double here.
-	linkArgs = [os.path.join(libs, 'crt1-command.o'), '-L' + libs, '-lc-printscan-long-double', '-lc', builtins]
+	# @emnapi/wasi-threads calls the exported malloc and free to pass each spawned thread its id.
+	linkArgs = [os.path.join(libs, 'crt1-command.o'), '-L' + libs, '-lc-printscan-long-double', '-lc', builtins,
+		'--import-memory', '--export-memory', '--shared-memory', f'--max-memory={maxMemory}',
+		'--export=malloc', '--export=free']
 
 	linker = os.environ.get('WASM_LD') or shutil.which('wasm-ld')
 	if linker:

@@ -136,8 +136,28 @@ package inout(Header)* headerOf(inout void* p) @trusted {
 }
 
 // Thread-local, since every thread querying a null container writes it.
-private template nullHeader(H) {
-	H nullHeader;
+version(WASI) {
+	private template decimal(size_t n) {
+		static if (n < 10) enum decimal = "0123456789"[n .. n + 1];
+		else enum decimal = decimal!(n / 10) ~ decimal!(n % 10);
+	}
+
+	// LDC compiles D thread-locals as shared globals on wasm, so the dummy is declared as a real LLVM thread_local instead.
+	private H* nullHeaderOf(H)() @trusted {
+		static import ldc.llvmasm;
+		enum name = `@"fp.pointer.nullHeader.` ~ H.mangleof ~ `"`;
+		return ldc.llvmasm.__irEx!(
+			name ~ " = linkonce_odr thread_local global [" ~ decimal!(H.sizeof) ~ " x i8] zeroinitializer, align " ~ decimal!(H.alignof),
+			"ret ptr " ~ name, "", H*)();
+	}
+} else {
+	private template nullHeader(H) {
+		H nullHeader;
+	}
+
+	private H* nullHeaderOf(H)() @trusted {
+		return &nullHeader!H;
+	}
 }
 
 /// The container header of type `H` in front of fat pointer `p`, for the containers that extend `Header` with one of their own. For null it returns a zeroed dummy of the calling thread's own, so every query on a null container reads as empty rather than faulting, on any number of threads at once; writes to the dummy are discarded by the next call.
@@ -149,8 +169,9 @@ private template nullHeader(H) {
 /// ---
 package H* containerHeaderOf(H)(inout void* p) @trusted {
 	if (p is null) {
-		nullHeader!H = H.init;
-		return &nullHeader!H;
+		H* dummy = nullHeaderOf!H();
+		*dummy = H.init;
+		return dummy;
 	}
 	return cast(H*)(cast(const(ubyte)*) p - H.sizeof);
 }

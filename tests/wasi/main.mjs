@@ -4,7 +4,7 @@ import { WASI } from "./node_modules/@tybys/wasm-util/dist/wasm-util.esm.min.js"
 import { WASIThreads } from "./node_modules/@emnapi/wasi-threads/dist/wasi-threads.js";
 import { channelName, onMessage, spawn } from "./env.mjs";
 
-// Limits for a build that imports a shared memory, in 64 KiB pages; libfp's single-threaded build exports its own and ignores this.
+// Limits of the shared memory the module imports, in 64 KiB pages; tools/wasi.py links with the same maximum.
 const initialPages = 256;
 const maximumPages = 16384;
 

@@ -47,9 +47,9 @@ python3 tools/wasi.py --serve    # build for wasm32-wasi and serve a page that r
 python3 tools/wasi.py --node     # build and run the same tests headlessly under Node
 ```
 
-The script builds the unittests with LDC for `wasm32-wasi`, linking against [wasi-sdk](https://github.com/WebAssembly/wasi-sdk)'s libc, which it downloads into `bin/wasi-sdk` on first use (or set `WASI_SYSROOT` and `WASI_BUILTINS`).
+The script builds the unittests with LDC for `wasm32-wasip1-threads`, linking against [wasi-sdk](https://github.com/WebAssembly/wasi-sdk)'s libc, which it downloads into `bin/wasi-sdk` on first use (or set `WASI_SYSROOT` and `WASI_BUILTINS`).
 The tests run through [@tybys/wasm-util](https://github.com/toyobayashi/wasm-util)'s WASI and [@emnapi/wasi-threads](https://github.com/toyobayashi/emnapi/tree/main/packages/wasi-threads), the same host bc-threads uses for its threads; the script installs both into `bin/wasi`, where the page and [tests/wasi/node.mjs](tests/wasi/node.mjs) import them alike, so CI covers the browser path's WASI layer too.
-[tests/wasi/run.mjs](tests/wasi/run.mjs) runs the tests on a worker, which reports its output and exit status over a `BroadcastChannel`, and `--serve` sends the cross-origin isolation headers that a threaded build's shared memory would need.
+[tests/wasi/run.mjs](tests/wasi/run.mjs) runs the tests on a worker, which reports its output and exit status over a `BroadcastChannel`, and `--serve` sends the cross-origin isolation headers that the build's shared memory needs.
 Output arrives a line at a time.
 A failed assertion aborts, which in wasm is a trap; the runner reports it as exit status 134.
 
