@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Builds the unittests for wasm32-wasi with threads and runs them in a browser, or headlessly under Node, through @tybys/wasm-util's WASI and @emnapi/wasi-threads.
+"""Builds the unittests for wasm32-wasi with threads and runs them in a browser, or headlessly under Node, through @bjorn3/browser_wasi_shim's WASI and @emnapi/wasi-threads.
 
 The build links against a wasi-sdk sysroot and compiler-rt builtins, downloaded once into bin/wasi-sdk unless WASI_SYSROOT and WASI_BUILTINS name local copies. It links with `wasm-ld` from PATH (or WASM_LD), falling back to LDC's internal linker.
 
@@ -22,7 +22,7 @@ release = f'https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-{
 target = 'wasm32-wasip1-threads'
 # Must match maximumPages in tests/wasi/main.mjs, which creates the shared memory the module imports.
 maxMemory = 16384 * 65536
-packages = ['@tybys/wasm-util@0.10.4', '@emnapi/wasi-threads@2.2.0']
+packages = ['@bjorn3/browser_wasi_shim@0.4.2', '@emnapi/wasi-threads@2.2.0']
 
 
 def fetch(name):
