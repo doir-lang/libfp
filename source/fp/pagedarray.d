@@ -20,6 +20,7 @@ static import core.checkedint;
 static import fp.dynarray;
 static import fp.lifecycle;
 static import fp.pointer;
+version(unittest) static import fp.testing;
 
 
 /// The page size `create` uses unless told otherwise.
@@ -502,12 +503,12 @@ unittest {
 	assert(grow(arr, size_t.max) is null);
 	assert(length(arr) == 1);
 
-	auto previous = fp.dynarray.beginRationedAllocator();
+	auto previous = fp.testing.beginRationedAllocator();
 	assert(grow(arr, 100) is null);
 	assert(length(arr) == 1);
 	assert(grow!int(arr, 2) is &arr[1]); // the rest of the first page needs no allocation
 	assert(grow(arr, 2) is null);
-	fp.dynarray.endRationedAllocator(previous);
+	fp.testing.endRationedAllocator(previous);
 	assert(length(arr) == 3 && capacity(arr) == 4 && arr[0] == 7);
 
 	// Fill every page and the page table's spare slots, so the next element needs a new page and a bigger table.
@@ -517,9 +518,9 @@ unittest {
 		assert(grow(arr, capacity(arr) - length(arr)) !is null);
 	immutable filled = length(arr);
 	immutable pagesBefore = fp.dynarray.length(arr.pages);
-	previous = fp.dynarray.beginRationedAllocator();
+	previous = fp.testing.beginRationedAllocator();
 	assert(!pushBack(arr, 8)); // refused at the table, before any page is allocated
-	fp.dynarray.endRationedAllocator(previous);
+	fp.testing.endRationedAllocator(previous);
 	assert(length(arr) == filled);
 	assert(fp.dynarray.length(arr.pages) == pagesBefore);
 
@@ -529,9 +530,9 @@ unittest {
 
 	popBackCount(arr, filled - 2);
 	immutable tableCapacity = fp.dynarray.capacity(arr.pages);
-	previous = fp.dynarray.beginRationedAllocator();
+	previous = fp.testing.beginRationedAllocator();
 	shrinkToFit(arr);
-	fp.dynarray.endRationedAllocator(previous);
+	fp.testing.endRationedAllocator(previous);
 	assert(capacity(arr) == 4);
 	assert(fp.dynarray.capacity(arr.pages) == tableCapacity);
 	assert(length(arr) == 2 && arr[0] == 7);
@@ -570,9 +571,9 @@ unittest {
 	assert(finalizeCount == 3);
 
 	// A refused grow leaves the array alone, rather than emptying the slots the count it did not reach would have covered.
-	auto rationed = fp.dynarray.beginRationedAllocator(0);
+	auto rationed = fp.testing.beginRationedAllocator(0);
 	assert(grow!Handle(arr, 3) is null && empty(arr));
-	fp.dynarray.endRationedAllocator(rationed);
+	fp.testing.endRationedAllocator(rationed);
 	assert(pushBack(arr, Handle(cast(int*) 4)) && arr[0].data == cast(int*) 4);
 
 	// Untyped `grow` on an array that knows lifetimes starts its new slots empty, so freeing cannot end a lifetime that never began.
@@ -589,9 +590,9 @@ unittest {
 	finalizeCount = 0;
 	PagedArrayOf!Handle tight = create!Handle(2 * Handle.sizeof);
 	assert(pushBack(tight, Handle(cast(int*) 5)) && pushBack(tight, Handle(cast(int*) 6)));
-	rationed = fp.dynarray.beginRationedAllocator(0);
+	rationed = fp.testing.beginRationedAllocator(0);
 	assert(!pushBack(tight, Handle(cast(int*) 7)) && finalizeCount == 1);
-	fp.dynarray.endRationedAllocator(rationed);
+	fp.testing.endRationedAllocator(rationed);
 	free(tight);
 	assert(finalizeCount == 3);
 }

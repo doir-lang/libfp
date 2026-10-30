@@ -7,9 +7,11 @@ private enum modules = [
 	"fp.lifecycle",
 	"fp.dynarray",
 	"fp.pagedarray",
-	"fp.fnv1a",
+	"fp.hash",
 	"fp.hashtable",
 	"fp.string",
+	"fp.file",
+	"fp.testing",
 ];
 
 private int runEveryTest() {

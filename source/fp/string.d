@@ -19,6 +19,7 @@ static import core.checkedint;
 
 static import fp.pointer;
 static import fp.dynarray;
+version(unittest) static import fp.testing;
 
 
 @nogc nothrow:
@@ -702,6 +703,35 @@ uint decodeUtf8(const(char)[] s, ref size_t i) @trusted {
 	return decodeUtf8(s, i, ignored);
 }
 
+/// The length in bytes of the UTF-8 sequence lead byte `lead` starts: 1 for ASCII, and for a continuation byte or a byte no sequence starts, so a scan stepping by it always advances. It does not check the bytes that follow.
+///
+/// Examples:
+/// ---
+/// assert(utf8SequenceLength('a') == 1 && utf8SequenceLength("é"[0]) == 2 && utf8SequenceLength("€"[0]) == 3);
+/// assert(utf8SequenceLength("😀"[0]) == 4 && utf8SequenceLength("é"[1]) == 1);
+/// ---
+size_t utf8SequenceLength(char lead) {
+	immutable c = cast(ubyte) lead;
+	if (c >= 0xF8) return 1;
+	if (c >= 0xF0) return 4;
+	if (c >= 0xE0) return 3;
+	if (c >= 0xC0) return 2;
+	return 1;
+}
+
+/// The UTF-16 code units byte `c` of UTF-8 text adds: 2 where it starts a four-byte sequence, which UTF-16 writes as a surrogate pair, 0 for a continuation byte, and 1 otherwise. Summed over well-formed text, it gives the text's UTF-16 length, as editors that count in UTF-16 need.
+///
+/// Examples:
+/// ---
+/// size_t units = 0;
+/// foreach (c; "aé😀") units += utf16Units(c);
+/// assert(units == 4);
+/// ---
+size_t utf16Units(char c) {
+	if ((c & 0xC0) == 0x80) return 0;
+	return utf8SequenceLength(c) == 4 ? 2 : 1;
+}
+
 /// Decodes UTF-8 into a new `fp.dynarray` of codepoints, which the caller frees with `fp.dynarray.free`. Returns null if the input is empty or not valid UTF-8, or an allocation was refused.
 ///
 /// Examples:
@@ -1055,6 +1085,16 @@ unittest {
 	j = 0;
 	assert(decodeUtf8("\xf4\x8f\xbf\xbf", j) == 0x10FFFF && j == 4);
 
+	// Sequence lengths agree with what decoding consumes, and UTF-16 units sum to each code point's units.
+	foreach (n, s; whole) {
+		size_t i = 0, units = 0;
+		cast(void) decodeUtf8(s, i);
+		assert(utf8SequenceLength(s[0]) == i);
+		foreach (c; s) units += utf16Units(c);
+		assert(units == (expected[n] >= 0x10000 ? 2 : 1));
+	}
+	assert(utf8SequenceLength('\x80') == 1 && utf8SequenceLength('\xFF') == 1 && utf16Units('\xFF') == 1);
+
 	uint* cp = codepoints("Hello, 世界 café \U0001F600");
 	scope(exit) fp.dynarray.free(cp);
 	uint[15] cps = ['H', 'e', 'l', 'l', 'o', ',', ' ', 0x4E16, 0x754C, ' ', 'c', 'a', 'f', 0xE9, ' '];
@@ -1083,21 +1123,21 @@ unittest {
 
 	// Refused at the copy of the slice argument, then at the result.
 	foreach (allowed; 0 .. 2) {
-		previous = fp.dynarray.beginRationedAllocator(allowed);
+		previous = fp.testing.beginRationedAllocator(allowed);
 		assert(format("%s", "text") is null);
-		fp.dynarray.endRationedAllocator(previous);
+		fp.testing.endRationedAllocator(previous);
 	}
 
 	// The first allocation holds one slice, or two where slices are 8 bytes, so a later push is refused, leaving a partial result.
-	previous = fp.dynarray.beginRationedAllocator(1);
+	previous = fp.testing.beginRationedAllocator(1);
 	assert(split("a,b,c", ",") is null);
-	fp.dynarray.endRationedAllocator(previous);
+	fp.testing.endRationedAllocator(previous);
 
 	// A refused push must leave the string untouched, not write a terminator through the null it leaves.
 	char* str = null;
-	previous = fp.dynarray.beginRationedAllocator();
+	previous = fp.testing.beginRationedAllocator();
 	assert(append(str, 'a') is null);
-	fp.dynarray.endRationedAllocator(previous);
+	fp.testing.endRationedAllocator(previous);
 	assert(str is null);
 
 	assert(append(str, 'a') !is null);
@@ -1105,58 +1145,58 @@ unittest {
 	while (fp.dynarray.length(str) < fp.dynarray.capacity(str))
 		assert(append(str, 'a') !is null);
 	immutable filled = length(str);
-	previous = fp.dynarray.beginRationedAllocator();
+	previous = fp.testing.beginRationedAllocator();
 	assert(append(str, 'b') is null);
-	fp.dynarray.endRationedAllocator(previous);
+	fp.testing.endRationedAllocator(previous);
 	assert(length(str) == filled && str[filled] == '\0');
 
 	char* s = makeDynamic("x");
 	scope(exit) free(s);
-	previous = fp.dynarray.beginRationedAllocator();
+	previous = fp.testing.beginRationedAllocator();
 	assert(concatenateMultiple(s, "more", 1) is null);
 	assert(appendCodepoint(s, 0xE9) == Utf8Error.allocationRefused);
-	fp.dynarray.endRationedAllocator(previous);
+	fp.testing.endRationedAllocator(previous);
 	assert(equal(s, "x"));
 
 	// The first piece is appended and the second refused: the first must be taken back off.
-	previous = fp.dynarray.beginRationedAllocator(1);
+	previous = fp.testing.beginRationedAllocator(1);
 	assert(concatenateMultiple(s, "abc", "a piece longer than the first allocation") is null);
-	fp.dynarray.endRationedAllocator(previous);
+	fp.testing.endRationedAllocator(previous);
 	assert(equal(s, "x") && s[1] == '\0');
 
 	// The first piece fits the first allocation; the second needs another.
-	previous = fp.dynarray.beginRationedAllocator(1);
+	previous = fp.testing.beginRationedAllocator(1);
 	assert(createFromConcatenation("abc", "a piece longer than the first allocation") is null);
-	fp.dynarray.endRationedAllocator(previous);
+	fp.testing.endRationedAllocator(previous);
 
 	// Refused at the copy of `ab`, then at the reservation.
 	char* ab = makeDynamic("ab");
 	scope(exit) free(ab);
 	foreach (allowed; 0 .. 2) {
-		previous = fp.dynarray.beginRationedAllocator(allowed);
+		previous = fp.testing.beginRationedAllocator(allowed);
 		assert(replicate(ab, 3) is null);
-		fp.dynarray.endRationedAllocator(previous);
+		fp.testing.endRationedAllocator(previous);
 		assert(equal(ab, "ab"));
 	}
 
 	char* dash = makeDynamic("a-b");
 	scope(exit) free(dash);
-	previous = fp.dynarray.beginRationedAllocator();
+	previous = fp.testing.beginRationedAllocator();
 	assert(replaceFirst(dash, "-", "--", 0) == fp.pointer.allocationRefused);
 	assert(replace(dash, "-", "--", 0) is null);
 	// Refused at the copies taken of arguments that view `dash`.
 	assert(replaceRange(dash, dash, 0, 0) is null);
 	assert(replace(dash, slice(dash)[1 .. 2], "+", 0) is null);
 	assert(replace(dash, "-", dash, 0) is null);
-	fp.dynarray.endRationedAllocator(previous);
+	fp.testing.endRationedAllocator(previous);
 	assert(equal(dash, "a-b"));
 
 	// Each first allocation succeeds and a later one is refused, leaving a partial result to free.
-	previous = fp.dynarray.beginRationedAllocator(1);
+	previous = fp.testing.beginRationedAllocator(1);
 	assert(codepoints("more than four codepoints") is null);
-	fp.dynarray.endRationedAllocator(previous);
+	fp.testing.endRationedAllocator(previous);
 	uint[2] wide = [0x4E16, 0x754C];
-	previous = fp.dynarray.beginRationedAllocator(1);
+	previous = fp.testing.beginRationedAllocator(1);
 	assert(fromCodepoints(wide[]) is null);
-	fp.dynarray.endRationedAllocator(previous);
+	fp.testing.endRationedAllocator(previous);
 }

@@ -578,39 +578,7 @@ bool swap(T)(T* da, size_t pos1, size_t pos2) {
 
 
 version(unittest) {
-	private __gshared fp.pointer.AllocFunction rationedUnderlying;
-	private __gshared size_t rationedRemaining;
-
-	private void* rationedAlloc(void* p, size_t size) {
-		// Frees are always forwarded, or a test could not clean up after itself.
-		if (size == 0) return rationedUnderlying(p, 0);
-		if (rationedRemaining == 0) return null;
-		--rationedRemaining;
-		return rationedUnderlying(p, size);
-	}
-
-	/// For tests of refused allocations: `beginRationedAllocator` makes `fp.pointer.allocFunction` grant only the next `n` allocations and refuse the rest, while still freeing; `endRationedAllocator` restores the allocator it returned.
-	///
-	/// Examples:
-	/// ---
-	/// auto previous = beginRationedAllocator(1);
-	/// int* granted = create!int(1);
-	/// assert(granted !is null && create!int(1) is null);
-	/// free(granted);
-	/// endRationedAllocator(previous);
-	/// ---
-	package fp.pointer.AllocFunction beginRationedAllocator(size_t n = 0) {
-		fp.pointer.AllocFunction previous = fp.pointer.allocFunction;
-		rationedUnderlying = previous;
-		rationedRemaining = n;
-		fp.pointer.allocFunction = &rationedAlloc;
-		return previous;
-	}
-
-	/// Ditto
-	package void endRationedAllocator(fp.pointer.AllocFunction previous) {
-		fp.pointer.allocFunction = previous;
-	}
+	static import fp.testing;
 
 	private __gshared fp.pointer.AllocFunction poisonUnderlying;
 
@@ -824,13 +792,13 @@ unittest {
 
 unittest {
 	// Every growth path, under an allocator that refuses.
-	auto previous = beginRationedAllocator();
+	auto previous = fp.testing.beginRationedAllocator();
 	int* fresh = null;
 	assert(growToSize(fresh, 4) is null);
 	assert(fresh is null);     // And nothing was half-built.
 	assert(create!int(4) is null);
 	assert(!pushBack(fresh, 1));
-	endRationedAllocator(previous);
+	fp.testing.endRationedAllocator(previous);
 
 	int* existing = null;
 	assert(pushBack(existing, 11));
@@ -842,7 +810,7 @@ unittest {
 	immutable filled = length(existing);
 	int* before = existing;
 
-	previous = beginRationedAllocator();
+	previous = fp.testing.beginRationedAllocator();
 	assert(reserve(existing, 4096) is null);
 	assert(!pushBack(existing, 33));
 	static immutable int[2] more = [44, 55];
@@ -853,12 +821,12 @@ unittest {
 	assert(!pushFront(existing, 77));
 	assert(clone(existing) is null);
 	assert(!swap(existing, 0, 1));
-	endRationedAllocator(previous);
+	fp.testing.endRationedAllocator(previous);
 
 	// Growing a null array past its default capacity takes one allocation, not a default-sized one that a refused second leaves behind.
-	previous = beginRationedAllocator(1);
+	previous = fp.testing.beginRationedAllocator(1);
 	assert(grow(fresh, 100) !is null);
-	endRationedAllocator(previous);
+	fp.testing.endRationedAllocator(previous);
 	assert(length(fresh) == 100 && capacity(fresh) == 128);
 	free(fresh);
 
@@ -944,9 +912,9 @@ unittest {
 	finalizeCount = 0;
 	Handle* tight = create!Handle(1);
 	assert(tight !is null && pushBack(tight, Handle(cast(int*) 5)));
-	auto rationed = beginRationedAllocator();
+	auto rationed = fp.testing.beginRationedAllocator();
 	assert(!pushBack(tight, Handle(cast(int*) 4)) && finalizeCount == 1 && length(tight) == 2);
-	endRationedAllocator(rationed);
+	fp.testing.endRationedAllocator(rationed);
 	assert(insert(tight, 1, Handle(cast(int*) 6)) && length(tight) == 3);
 
 	// The `matchCapacity` path reallocates, so a middle range's lifetimes end before the old block is freed.

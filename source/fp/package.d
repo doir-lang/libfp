@@ -11,6 +11,8 @@
 /// char* text = fp.string.makeDynamic("hi");
 /// assert(fp.string.length(text) == 2);
 /// fp.string.free(text);
+///
+/// assert(murmur(cast(const(ubyte)[]) "hi") != fnv1a(cast(const(ubyte)[]) "hi"));
 /// ---
 module fp;
 
@@ -18,6 +20,8 @@ public import fp.pointer;
 public import fp.lifecycle;
 public import fp.dynarray;
 public import fp.pagedarray;
-public import fp.fnv1a;
+public import fp.hash;
 public import fp.hashtable;
 public import fp.string;
+public import fp.file;
+public import fp.testing;
