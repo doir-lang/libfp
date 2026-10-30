@@ -11,6 +11,7 @@ private enum modules = [
 	"fp.hashtable",
 	"fp.string",
 	"fp.file",
+	"fp.rope",
 	"fp.testing",
 ];
 
