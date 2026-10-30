@@ -12,9 +12,11 @@ Ported from an earlier C/C++ implementation (parallel C-macro and C++ template A
 - `fp.dynarray` — growable arrays on top of `fp.pointer` (`reserve`, `pushBack`, `pushFront`, `insert`, `removeAt`, `clone`, ...).
 - `fp.pagedarray` — a growable array of fixed-size pages whose elements never move, for pointers that must survive further appends.
   A plain struct with a runtime element size rather than a fat pointer.
-- `fp.fnv1a` — FNV-1a hashing over a byte slice.
+- `fp.hash` — `murmur`, MurmurHash3 and the hash table's default; `fnv1a`; and `mix`, for chaining a hash over several values.
 - `fp.hashtable` — a hopscotch-hashing open-addressing hash table on top of `fp.dynarray`.
-- `fp.string` — null-terminated dynamic strings on top of `fp.dynarray`, with UTF-8 ⇄ UTF-32 conversion.
+- `fp.string` — null-terminated dynamic strings on top of `fp.dynarray`, with UTF-8 ⇄ UTF-32 conversion and UTF-16 lengths.
+- `fp.file` — whole files: reading one into an `fp.string`, writing or appending to one, and mapping one into memory read-only.
+- `fp.testing` — helpers for tests of code built on libfp, such as an allocator that refuses after a given number of allocations.
 
 ## Imports
 

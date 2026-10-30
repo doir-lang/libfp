@@ -18,7 +18,8 @@ static import core.checkedint;
 static import fp.lifecycle;
 static import fp.pointer;
 static import fp.dynarray;
-static import fp.fnv1a;
+static import fp.hash;
+version(unittest) static import fp.testing;
 public import fp.pointer : notFound;
 public import fp.lifecycle : FinalizeFunction;
 
@@ -34,7 +35,7 @@ alias EqualFunction = bool function(inout(ubyte)[], inout(ubyte)[]);
 alias CopyFunction = void* function(void*, inout(void)*, size_t);
 
 private size_t defaultHash(inout(ubyte)[] data) {
-	return fp.fnv1a.hash(data);
+	return cast(size_t) fp.hash.murmur(data);
 }
 
 private bool defaultEqual(inout(ubyte)[] a, inout(ubyte)[] b) @trusted {
@@ -84,7 +85,7 @@ private void normalizePadding(T)(ref T key) @trusted {
 /// assert(capacity(table) == 16);
 /// ---
 struct Config {
-	HashFunction hashFunction = &defaultHash; /// FNV-1a by default.
+	HashFunction hashFunction = &defaultHash; /// `fp.hash.murmur` by default.
 	EqualFunction equalFunction = &defaultEqual; /// `memcmp` by default.
 	CopyFunction copyFunction = &defaultCopy; /// `memcpy` by default; `create!T` replaces it with a move for a key type that declares a lifetime.
 	FinalizeFunction finalizeFunction = null; /// Called on each key removed or freed with the table; null for none. `create!T` sets it for key types that declare a lifetime.
@@ -649,8 +650,9 @@ unittest {
 
 	int* v = insertAssumeUnique(table, 5);
 	assert(*v == 5);
+	int five = 5;
 	immutable p = findPosition(table, 5);
-	assert(p == 6 && table[p] == 5);
+	assert(p == fp.hash.murmur((cast(ubyte*) &five)[0 .. int.sizeof]) % fp.pointer.length(table) && table[p] == 5);
 	assert(find(table, 5) is v);
 	assert(insert(table, 5) is v);
 
@@ -760,10 +762,10 @@ unittest {
 		assert(insert(table, i) !is null);
 	assert(capacity(table) == 8);
 
-	auto previous = fp.dynarray.beginRationedAllocator();
+	auto previous = fp.testing.beginRationedAllocator();
 	assert(insert(table, 100) is null);
 	assert(rehash(table, 0) == fp.pointer.allocationRefused);
-	fp.dynarray.endRationedAllocator(previous);
+	fp.testing.endRationedAllocator(previous);
 	assert(capacity(table) == 8 && !contains(table, 100));
 	foreach (i; 0 .. 8)
 		assert(contains(table, i));
@@ -782,9 +784,9 @@ unittest {
 		assert(*find(table, i) == i);
 
 	// The slots' allocation succeeds and `entryInfos`' is refused: the slots must be freed, not leaked.
-	previous = fp.dynarray.beginRationedAllocator(1);
+	previous = fp.testing.beginRationedAllocator(1);
 	assert(create!int() is null);
-	fp.dynarray.endRationedAllocator(previous);
+	fp.testing.endRationedAllocator(previous);
 
 	// A slot count whose byte count wraps is refused before the allocator sees a wrapped, too-small request.
 	static size_t requests;
@@ -1018,9 +1020,9 @@ unittest {
 	assert(tight !is null);
 	assert(insert(tight, Key(cast(int*) 1)) !is null);
 	assert(insert(tight, Key(cast(int*) 1)) !is null && finalizeCallCount == 1);
-	auto rationed = fp.dynarray.beginRationedAllocator(0);
+	auto rationed = fp.testing.beginRationedAllocator(0);
 	assert(insert(tight, Key(cast(int*) 2)) is null && finalizeCallCount == 2);
-	fp.dynarray.endRationedAllocator(rationed);
+	fp.testing.endRationedAllocator(rationed);
 	free(tight);
 	assert(finalizeCallCount == 3);
 }
