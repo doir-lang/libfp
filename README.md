@@ -15,7 +15,7 @@ Ported from an earlier C/C++ implementation (parallel C-macro and C++ template A
 - `fp.hash` — `murmur`, MurmurHash3 and the hash table's default; `fnv1a`; and `mix`, for chaining a hash over several values.
 - `fp.hashtable` — a hopscotch-hashing open-addressing hash table on top of `fp.dynarray`.
 - `fp.string` — null-terminated dynamic strings on top of `fp.dynarray`, with UTF-8 ⇄ UTF-32 conversion and UTF-16 lengths.
-- `fp.file` — whole files: reading one into an `fp.string`, writing or appending to one, and mapping one into memory read-only.
+- `fp.file` — whole files: reading one into an `fp.string`, writing or appending to one, and mapping one into memory, read-only or writable; on WASI, which has no real mapping, a mapped file is read into memory instead.
 - `fp.rope` — text as a persistent rope: immutable versions sharing the leaves an edit leaves alone, with edits and line lookups in O(log n).
 - `fp.testing` — helpers for tests of code built on libfp, such as an allocator that refuses after a given number of allocations.
 
@@ -51,7 +51,7 @@ python3 tools/wasi.py --node     # build and run the same tests headlessly under
 ```
 
 The script builds the unittests with LDC for `wasm32-wasip1-threads`, linking against [wasi-sdk](https://github.com/WebAssembly/wasi-sdk)'s libc, which it downloads into `bin/wasi-sdk` on first use (or set `WASI_SYSROOT` and `WASI_BUILTINS`).
-The tests run through [@tybys/wasm-util](https://github.com/toyobayashi/wasm-util)'s WASI and [@emnapi/wasi-threads](https://github.com/toyobayashi/emnapi/tree/main/packages/wasi-threads), the same host bc-threads uses for its threads; the script installs both into `bin/wasi`, where the page and [tests/wasi/node.mjs](tests/wasi/node.mjs) import them alike, so CI covers the browser path's WASI layer too.
+The tests run through [@bjorn3/browser_wasi_shim](https://github.com/bjorn3/browser_wasi_shim)'s WASI, whose in-memory filesystem gives the file tests an empty `/tmp`, and [@emnapi/wasi-threads](https://github.com/toyobayashi/emnapi/tree/main/packages/wasi-threads); the script installs both into `bin/wasi`, where the page and [tests/wasi/node.mjs](tests/wasi/node.mjs) import them alike, so CI covers the browser path's WASI layer too.
 [tests/wasi/run.mjs](tests/wasi/run.mjs) runs the tests on a worker, which reports its output and exit status over a `BroadcastChannel`, and `--serve` sends the cross-origin isolation headers that the build's shared memory needs.
 Output arrives a line at a time.
 A failed assertion aborts, which in wasm is a trap; the runner reports it as exit status 134.
