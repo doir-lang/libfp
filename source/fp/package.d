@@ -24,4 +24,5 @@ public import fp.hash;
 public import fp.hashtable;
 public import fp.string;
 public import fp.file;
+public import fp.rope;
 public import fp.testing;

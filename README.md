@@ -16,6 +16,7 @@ Ported from an earlier C/C++ implementation (parallel C-macro and C++ template A
 - `fp.hashtable` — a hopscotch-hashing open-addressing hash table on top of `fp.dynarray`.
 - `fp.string` — null-terminated dynamic strings on top of `fp.dynarray`, with UTF-8 ⇄ UTF-32 conversion and UTF-16 lengths.
 - `fp.file` — whole files: reading one into an `fp.string`, writing or appending to one, and mapping one into memory read-only.
+- `fp.rope` — text as a persistent rope: immutable versions sharing the leaves an edit leaves alone, with edits and line lookups in O(log n).
 - `fp.testing` — helpers for tests of code built on libfp, such as an allocator that refuses after a given number of allocations.
 
 ## Imports
