@@ -135,11 +135,12 @@ package inout(Header)* headerOf(inout void* p) @trusted {
 	return cast(inout(Header)*)(cast(const(ubyte)*) p - Header.sizeof);
 }
 
+// Thread-local, since every thread querying a null container writes it.
 private template nullHeader(H) {
-	__gshared H nullHeader;
+	H nullHeader;
 }
 
-/// The container header of type `H` in front of fat pointer `p`, for the containers that extend `Header` with one of their own. For null it returns a zeroed shared dummy, so every query on a null container reads as empty rather than faulting; writes to the dummy are discarded by the next call.
+/// The container header of type `H` in front of fat pointer `p`, for the containers that extend `Header` with one of their own. For null it returns a zeroed dummy of the calling thread's own, so every query on a null container reads as empty rather than faulting, on any number of threads at once; writes to the dummy are discarded by the next call.
 ///
 /// Examples:
 /// ---
@@ -553,6 +554,17 @@ unittest {
 	assert(length(arr) == 25);
 	assert(arr[20] == 6);
 	assert(!empty(arr));
+
+	// Each thread queries null containers through a dummy header of its own, which no other thread writes.
+	version(Posix) {
+		static import core.sys.posix.pthread;
+		static extern(C) void* dummyOf(void*) @nogc nothrow { return containerHeaderOf!Header(null); }
+		core.sys.posix.pthread.pthread_t thread;
+		void* theirs;
+		assert(core.sys.posix.pthread.pthread_create(&thread, null, &dummyOf, null) == 0);
+		assert(core.sys.posix.pthread.pthread_join(thread, &theirs) == 0);
+		assert(theirs !is null && theirs !is containerHeaderOf!Header(null));
+	}
 
 	int[] view = slice(arr);
 	assert(view.length == 25 && view[20] == 6);
