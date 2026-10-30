@@ -1055,7 +1055,7 @@ unittest {
 			present[k] = true;
 		}
 		if (step % 512 == 0)
-			foreach (ulong j; 0 .. n) assert(contains(churn, j) == present[j]);
+			foreach (size_t j; 0 .. n) assert(contains(churn, j) == present[j]);
 	}
-	foreach (ulong j; 0 .. n) assert(contains(churn, j) == present[j]);
+	foreach (size_t j; 0 .. n) assert(contains(churn, j) == present[j]);
 }
