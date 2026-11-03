@@ -51,6 +51,8 @@
 - Every function that can fail says in its DDoc how it reports failure (null, `false`, `fp.pointer.notFound`, `fp.pointer.allocationRefused`), and what state it leaves its arguments in; prefer leaving them as they were.
 - Never drop the result of a call that can fail: check it, or discard it explicitly with `cast(void)` when failure is impossible or harmless there.
   Tests assert on it.
+- Return `std.typecons.Nullable` only of a struct or a pointer, never of a slice or other non-aggregate value.
+  Such a `Nullable` gets a `toHash` that needs druntime's hashing, which `-betterC` does not link, and MSVC's linker fails on it even when nothing calls it; wrap a slice in a struct instead.
 - When a limit on one value follows from another (such as a bit position), name the constant once, derive the others from it, and `assert` the limit where the value is accepted.
 - Put test-only code, such as helper functions and globals the tests use, inside `version(unittest)`.
 

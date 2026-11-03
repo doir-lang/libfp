@@ -1,4 +1,4 @@
-/// Whole files: reading one into an fp string, writing or appending to one, through C's stdio, and mapping one into memory, read-only or writable.
+/// Whole files: reading one into an fp string, writing, appending to or removing one, and mapping one into memory, read-only or writable. And open descriptors, such as stdin and stdout: reading what has arrived, and writing.
 ///
 /// Examples:
 /// ---
@@ -12,6 +12,7 @@
 /// ---
 module fp.file;
 
+static import core.stdc.errno;
 static import core.stdc.stdio;
 
 static import std.typecons;
@@ -19,20 +20,43 @@ static import std.typecons;
 static import fp.dynarray;
 static import fp.string;
 
+version(Windows) {} else static import core.sys.posix.unistd;
+
 // WASI's mmap only emulates a mapping by reading the file, which the fallback here does without an extra library.
-version(WASI) {} else version(Posix) version = memoryMapping;
+version(WASI) {} else version(Posix) {
+	version = memoryMapping;
+	version = posixMapping;
+} else version(Windows) {
+	version = memoryMapping;
+	version = windowsMapping;
+}
 
 @nogc nothrow:
 
 
 // --- reading -----------------------------------------------------------------
 
+version(Windows) private extern(C) core.stdc.stdio.FILE* _wfopen(const(wchar)* path, const(wchar)* mode);
+
 // The file at `path` opened in C `mode`, or null if it cannot be or the path's copy is refused.
-private core.stdc.stdio.FILE* open(const(char)[] path, const(char)* mode) {
-	char* name = fp.string.makeDynamic(path);
-	if (name is null) return null;
-	scope(exit) fp.string.free(name);
-	return core.stdc.stdio.fopen(name, mode);
+private core.stdc.stdio.FILE* open(const(char)[] path, const(char)* mode) @trusted {
+	version(Windows) {
+		// fopen would read `path` in the ANSI code page rather than as UTF-8.
+		wchar* name = fp.string.utf16(path);
+		if (name is null) return null;
+		scope(exit) fp.dynarray.free(name);
+		wchar[4] wideMode = 0;
+		for (size_t i = 0; mode[i] != 0; ++i) {
+			assert(i < wideMode.length - 1);
+			wideMode[i] = mode[i];
+		}
+		return _wfopen(name, wideMode.ptr);
+	} else {
+		char* name = fp.string.makeDynamic(path);
+		if (name is null) return null;
+		scope(exit) fp.string.free(name);
+		return core.stdc.stdio.fopen(name, mode);
+	}
 }
 
 /// The whole of the file at `path`, as a new fp string the caller frees; an empty file is a null string.
@@ -109,12 +133,51 @@ bool appendFile(const(char)[] path, const(char)[] text) {
 	return write(path, text, "ab");
 }
 
+version(Windows) private extern(C) int _wremove(const(wchar)* path);
+
+/// Removes the file at `path`.
+///
+/// Returns false if it cannot be removed, such as when there is none, or the path's copy is refused.
+///
+/// Examples:
+/// ---
+/// assert(writeFile("bin/fp-file-remove-example", "x"));
+/// assert(removeFile("bin/fp-file-remove-example"));
+/// assert(!removeFile("bin/fp-file-remove-example"));
+/// ---
+bool removeFile(const(char)[] path) @trusted {
+	version(Windows) {
+		wchar* name = fp.string.utf16(path);
+		if (name is null) return false;
+		scope(exit) fp.dynarray.free(name);
+		return _wremove(name) == 0;
+	} else {
+		char* name = fp.string.makeDynamic(path);
+		if (name is null) return false;
+		scope(exit) fp.string.free(name);
+		return core.stdc.stdio.remove(name) == 0;
+	}
+}
+
 
 // --- mapping -----------------------------------------------------------------
 
-version(memoryMapping) {
+/// A file mapped into memory read-only, released by `free`. Where memory mapping is unavailable, as on WASI, the file is read into memory instead, which a reader cannot tell apart.
+struct MappedFile {
+	const(char)[] bytes; /// The file's contents; null for an empty file.
+	private bool read; // whether `bytes` is an fp string `readFile` made rather than a mapping
+}
+
+/// A file mapped into memory for reading and writing, released by `free`. Where memory mapping is unavailable, as on WASI, the file is read into memory instead, and what is written reaches the file only through `sync` or `free`.
+struct WritableMappedFile {
+	char[] bytes; /// The file's contents, whose changes are written to it; null for an empty file.
+	private char* path; // the fp string copy of the path that `sync` writes `bytes` back to, when they were read rather than mapped
+	version(windowsMapping) private void* file; // the open file, which `sync` flushes to disk
+}
+
+version(posixMapping) {
 	// The whole file at `path`, opened with `access` and mapped with `protection` and `flags`; empty for an empty file, null on failure.
-	private std.typecons.Nullable!(char[]) map(const(char)[] path, int access, int protection, int flags) @trusted {
+	private std.typecons.Nullable!WritableMappedFile map(const(char)[] path, int access, int protection, int flags) @trusted {
 		static import core.sys.posix.fcntl;
 		static import core.sys.posix.sys.mman;
 		static import core.sys.posix.sys.stat;
@@ -128,20 +191,46 @@ version(memoryMapping) {
 		scope(exit) cast(void) core.sys.posix.unistd.close(fd);
 		core.sys.posix.sys.stat.stat_t status;
 		if (core.sys.posix.sys.stat.fstat(fd, &status) != 0 || !core.sys.posix.sys.stat.S_ISREG(status.st_mode)) return typeof(return).init;
-		if (status.st_size == 0) return typeof(return)(cast(char[]) null);
+		if (status.st_size == 0) return typeof(return)(WritableMappedFile.init);
 		auto p = core.sys.posix.sys.mman.mmap(null, cast(size_t) status.st_size, protection, flags, fd, 0);
 		if (p == core.sys.posix.sys.mman.MAP_FAILED) return typeof(return).init;
-		return typeof(return)((cast(char*) p)[0 .. cast(size_t) status.st_size]);
+		return typeof(return)(WritableMappedFile((cast(char*) p)[0 .. cast(size_t) status.st_size]));
 	}
 }
 
-/// A file mapped into memory read-only, released by `free`. Where memory mapping is unavailable, as on WASI and Windows, the file is read into memory instead, which a reader cannot tell apart.
-struct MappedFile {
-	const(char)[] bytes; /// The file's contents; null for an empty file.
-	private bool read; // whether `bytes` is an fp string `readFile` made rather than a mapping
+version(windowsMapping) {
+	// The whole file at `path`, opened with `access` and viewed with `protection` and `view`; empty for an empty file, null on failure. With `keepFile`, the result holds the open file.
+	private std.typecons.Nullable!WritableMappedFile map(const(char)[] path, uint access, uint protection, uint view, bool keepFile) @trusted {
+		static import core.sys.windows.winbase;
+		static import core.sys.windows.winnt;
+		wchar* name = fp.string.utf16(path);
+		if (name is null) return typeof(return).init;
+		scope(exit) fp.dynarray.free(name);
+		// Sharing everything matches POSIX, where a mapping locks nothing. Without backup semantics a directory does not open.
+		auto file = core.sys.windows.winbase.CreateFileW(name, access, core.sys.windows.winnt.FILE_SHARE_READ | core.sys.windows.winnt.FILE_SHARE_WRITE | core.sys.windows.winnt.FILE_SHARE_DELETE, null, core.sys.windows.winbase.OPEN_EXISTING, core.sys.windows.winnt.FILE_ATTRIBUTE_NORMAL, null);
+		if (file == core.sys.windows.winbase.INVALID_HANDLE_VALUE) return typeof(return).init;
+		bool kept = false;
+		scope(exit) if (!kept) cast(void) core.sys.windows.winbase.CloseHandle(file);
+		long size;
+		if (!core.sys.windows.winbase.GetFileSizeEx(file, cast(core.sys.windows.winnt.LARGE_INTEGER*) &size) || cast(ulong) size > size_t.max) return typeof(return).init;
+		if (size == 0) return typeof(return)(WritableMappedFile.init);
+		auto mapping = core.sys.windows.winbase.CreateFileMappingW(file, null, protection, 0, 0, null);
+		if (mapping is null) return typeof(return).init;
+		// The view keeps the mapping alive once it is made.
+		scope(exit) cast(void) core.sys.windows.winbase.CloseHandle(mapping);
+		auto p = core.sys.windows.winbase.MapViewOfFile(mapping, view, 0, 0, cast(size_t) size);
+		if (p is null) return typeof(return).init;
+		WritableMappedFile mapped;
+		mapped.bytes = (cast(char*) p)[0 .. cast(size_t) size];
+		if (keepFile) {
+			mapped.file = file;
+			kept = true;
+		}
+		return typeof(return)(mapped);
+	}
 }
 
-/// The file at `path` mapped into memory read-only. The mapping is private, so the bytes do not change if the file is written later, unless it is truncated, which on POSIX makes reading past its new end raise `SIGBUS`.
+/// The file at `path` mapped into memory read-only. Writes to the file while it is mapped may show through `bytes`. On POSIX, truncating it makes reading past its new end raise `SIGBUS`; on Windows, a write that would truncate it, such as `writeFile`, fails while it is mapped.
 ///
 /// Returns null if the file cannot be opened, measured or mapped, `path` names a directory, or an allocation is refused.
 ///
@@ -150,12 +239,18 @@ struct MappedFile {
 /// assert(mapFile("no/such/file").isNull);
 /// ---
 std.typecons.Nullable!MappedFile mapFile(const(char)[] path) @trusted {
-	version(memoryMapping) {
+	version(posixMapping) {
 		static import core.sys.posix.fcntl;
 		static import core.sys.posix.sys.mman;
-		auto bytes = map(path, core.sys.posix.fcntl.O_RDONLY, core.sys.posix.sys.mman.PROT_READ, core.sys.posix.sys.mman.MAP_PRIVATE);
-		if (bytes.isNull) return typeof(return).init;
-		return typeof(return)(MappedFile(bytes.get));
+		auto mapped = map(path, core.sys.posix.fcntl.O_RDONLY, core.sys.posix.sys.mman.PROT_READ, core.sys.posix.sys.mman.MAP_PRIVATE);
+	} else version(windowsMapping) {
+		static import core.sys.windows.winbase;
+		static import core.sys.windows.winnt;
+		auto mapped = map(path, core.sys.windows.winnt.GENERIC_READ, core.sys.windows.winnt.PAGE_READONLY, core.sys.windows.winbase.FILE_MAP_READ, false);
+	}
+	version(memoryMapping) {
+		if (mapped.isNull) return typeof(return).init;
+		return typeof(return)(MappedFile(mapped.get.bytes));
 	} else {
 		auto text = readFile(path);
 		if (text.isNull) return typeof(return).init;
@@ -176,17 +271,16 @@ void free(ref MappedFile file) @trusted {
 	if (file.read) {
 		auto text = cast(char*) file.bytes.ptr;
 		fp.string.free(text);
-	} else version(memoryMapping) {
-		static import core.sys.posix.sys.mman;
-		if (file.bytes.length) cast(void) core.sys.posix.sys.mman.munmap(cast(void*) file.bytes.ptr, file.bytes.length);
+	} else if (file.bytes.length) {
+		version(posixMapping) {
+			static import core.sys.posix.sys.mman;
+			cast(void) core.sys.posix.sys.mman.munmap(cast(void*) file.bytes.ptr, file.bytes.length);
+		} else version(windowsMapping) {
+			static import core.sys.windows.winbase;
+			cast(void) core.sys.windows.winbase.UnmapViewOfFile(file.bytes.ptr);
+		}
 	}
 	file = MappedFile.init;
-}
-
-/// A file mapped into memory for reading and writing, released by `free`. Where memory mapping is unavailable, as on WASI and Windows, the file is read into memory instead, and what is written reaches the file only through `sync` or `free`.
-struct WritableMappedFile {
-	char[] bytes; /// The file's contents, whose changes are written to it; null for an empty file.
-	private char* path; // the fp string copy of the path that `sync` writes `bytes` back to, when they were read rather than mapped
 }
 
 /// The file at `path` mapped into memory for reading and writing. The mapping is shared, so other readers of the file see what is written to it, and it has the file's size, so it cannot grow the file.
@@ -206,12 +300,14 @@ struct WritableMappedFile {
 /// assert(mapFileWritable("no/such/file").isNull);
 /// ---
 std.typecons.Nullable!WritableMappedFile mapFileWritable(const(char)[] path) @trusted {
-	version(memoryMapping) {
+	version(posixMapping) {
 		static import core.sys.posix.fcntl;
 		static import core.sys.posix.sys.mman;
-		auto bytes = map(path, core.sys.posix.fcntl.O_RDWR, core.sys.posix.sys.mman.PROT_READ | core.sys.posix.sys.mman.PROT_WRITE, core.sys.posix.sys.mman.MAP_SHARED);
-		if (bytes.isNull) return typeof(return).init;
-		return typeof(return)(WritableMappedFile(bytes.get));
+		return map(path, core.sys.posix.fcntl.O_RDWR, core.sys.posix.sys.mman.PROT_READ | core.sys.posix.sys.mman.PROT_WRITE, core.sys.posix.sys.mman.MAP_SHARED);
+	} else version(windowsMapping) {
+		static import core.sys.windows.winbase;
+		static import core.sys.windows.winnt;
+		return map(path, core.sys.windows.winnt.GENERIC_READ | core.sys.windows.winnt.GENERIC_WRITE, core.sys.windows.winnt.PAGE_READWRITE, core.sys.windows.winbase.FILE_MAP_WRITE, true);
 	} else {
 		// Opened for update only to learn that the file can be written back.
 		auto f = open(path, "r+b");
@@ -246,9 +342,14 @@ std.typecons.Nullable!WritableMappedFile mapFileWritable(const(char)[] path) @tr
 /// ---
 bool sync(ref WritableMappedFile file) @trusted {
 	if (file.path !is null) return writeFile(fp.string.slice(file.path), file.bytes);
-	version(memoryMapping) {
+	if (file.bytes.length == 0) return true;
+	version(posixMapping) {
 		static import core.sys.posix.sys.mman;
-		return file.bytes.length == 0 || core.sys.posix.sys.mman.msync(file.bytes.ptr, file.bytes.length, core.sys.posix.sys.mman.MS_SYNC) == 0;
+		return core.sys.posix.sys.mman.msync(file.bytes.ptr, file.bytes.length, core.sys.posix.sys.mman.MS_SYNC) == 0;
+	} else version(windowsMapping) {
+		static import core.sys.windows.winbase;
+		// FlushViewOfFile only starts the write; FlushFileBuffers waits for it to reach the disk.
+		return core.sys.windows.winbase.FlushViewOfFile(file.bytes.ptr, file.bytes.length) && core.sys.windows.winbase.FlushFileBuffers(file.file);
 	} else return true;
 }
 
@@ -270,31 +371,108 @@ bool free(ref WritableMappedFile file) @trusted {
 		auto text = file.bytes.ptr;
 		fp.string.free(text);
 		fp.string.free(file.path);
-	} else version(memoryMapping) {
-		static import core.sys.posix.sys.mman;
-		if (file.bytes.length) cast(void) core.sys.posix.sys.mman.munmap(file.bytes.ptr, file.bytes.length);
+	} else if (file.bytes.length) {
+		version(posixMapping) {
+			static import core.sys.posix.sys.mman;
+			cast(void) core.sys.posix.sys.mman.munmap(file.bytes.ptr, file.bytes.length);
+		} else version(windowsMapping) {
+			static import core.sys.windows.winbase;
+			cast(void) core.sys.windows.winbase.UnmapViewOfFile(file.bytes.ptr);
+			cast(void) core.sys.windows.winbase.CloseHandle(file.file);
+		}
 	}
 	file = WritableMappedFile.init;
 	return wrote;
 }
 
 
+// --- descriptors -------------------------------------------------------------
+
+version(Windows) {
+	// The C runtime's descriptor I/O, which druntime does not declare.
+	private extern(C) {
+		int _read(int fd, void* into, uint length);
+		int _write(int fd, const(void)* from, uint length);
+		int _setmode(int fd, int mode);
+		void function(const(wchar)*, const(wchar)*, const(wchar)*, uint, size_t) @nogc nothrow _set_thread_local_invalid_parameter_handler(void function(const(wchar)*, const(wchar)*, const(wchar)*, uint, size_t) @nogc nothrow handler);
+	}
+
+	private enum int binaryMode = 0x8000;
+
+	// The runtime ends the process on a bad descriptor unless a handler for it returns, which makes the call fail instead.
+	private extern(C) void ignoreInvalidParameter(const(wchar)*, const(wchar)*, const(wchar)*, uint, size_t) {}
+
+	// Runs `transfer` on `fd` in binary mode, failing rather than ending the process if `fd` is bad.
+	private int guarded(int fd, scope int delegate() @nogc nothrow transfer) @trusted {
+		auto previous = _set_thread_local_invalid_parameter_handler(&ignoreInvalidParameter);
+		scope(exit) cast(void) _set_thread_local_invalid_parameter_handler(previous);
+		if (_setmode(fd, binaryMode) < 0) return -1;
+		return transfer();
+	}
+}
+
+/// Reads up to `into.length` bytes from the open descriptor `fd` into `into`, in one read, and returns how many: 0 once the stream has ended, or when `into` is empty. It retries a read a signal interrupts. On Windows `fd` is a C runtime descriptor, which this leaves in binary mode, so the runtime neither adds nor drops carriage returns.
+///
+/// Returns -1 if `fd` is not open for reading or the read fails; `into` may then have changed.
+///
+/// Examples:
+/// ---
+/// char[16] buffer;
+/// assert(readSome(-1, buffer[]) == -1);
+/// ---
+ptrdiff_t readSome(int fd, char[] into) @trusted {
+	for (;;) {
+		version(Windows) immutable got = guarded(fd, () => _read(fd, into.ptr, cast(uint) (into.length < int.max ? into.length : int.max)));
+		else immutable got = core.sys.posix.unistd.read(fd, into.ptr, into.length);
+		if (got >= 0 || core.stdc.errno.errno != core.stdc.errno.EINTR) return got;
+	}
+}
+
+/// Writes up to all of `bytes` to the open descriptor `fd`, in one write, and returns how many it took. It retries a write a signal interrupts. On Windows `fd` is a C runtime descriptor, which this leaves in binary mode, as `readSome` does.
+///
+/// Returns -1 if `fd` is not open for writing or the write fails.
+///
+/// Examples:
+/// ---
+/// assert(writeSome(-1, "text") == -1);
+/// ---
+ptrdiff_t writeSome(int fd, const(char)[] bytes) @trusted {
+	for (;;) {
+		version(Windows) immutable wrote = guarded(fd, () => _write(fd, bytes.ptr, cast(uint) (bytes.length < int.max ? bytes.length : int.max)));
+		else immutable wrote = core.sys.posix.unistd.write(fd, bytes.ptr, bytes.length);
+		if (wrote >= 0 || core.stdc.errno.errno != core.stdc.errno.EINTR) return wrote;
+	}
+}
+
+/// Writes all of `bytes` to the open descriptor `fd`, in as many writes as it takes, as `writeSome` does each. Writing nothing always succeeds.
+///
+/// Returns false if a write fails or takes nothing, perhaps after some of `bytes` were written.
+///
+/// Examples:
+/// ---
+/// assert(!writeAll(-1, "text") && writeAll(-1, ""));
+/// ---
+bool writeAll(int fd, const(char)[] bytes) {
+	while (bytes.length) {
+		immutable wrote = writeSome(fd, bytes);
+		if (wrote <= 0) return false;
+		bytes = bytes[wrote .. $];
+	}
+	return true;
+}
+
+
 unittest { // reading, writing, appending and mapping one file: what is written reads and maps back, and failures leave nothing behind
 	static import fp.testing;
-	version(memoryMapping) {
-		static import core.sys.posix.stdlib;
-		static import core.sys.posix.unistd;
-		char[20] path = "/tmp/fp-file-XXXXXX\0";
-		immutable fd = core.sys.posix.stdlib.mkstemp(path.ptr);
-		assert(fd >= 0);
-		cast(void) core.sys.posix.unistd.close(fd);
-	} else {
-		// The WASI runner preopens a fresh /tmp, so a fixed name cannot collide.
-		char[19] path = "/tmp/fp-file-test\0\0";
-		assert(writeFile(path[0 .. 17], ""));
-	}
-	const name = fp.string.slice(path.ptr);
-	scope(exit) cast(void) core.stdc.stdio.remove(path.ptr);
+	char* path = fp.testing.temporaryFile();
+	assert(path !is null);
+	scope(exit) fp.string.free(path);
+	const name = fp.string.slice(path);
+	scope(exit) cast(void) removeFile(name);
+	char* directoryPath = fp.testing.temporaryDirectory();
+	assert(directoryPath !is null);
+	scope(exit) fp.string.free(directoryPath);
+	const directory = fp.string.slice(directoryPath);
 	auto empty = readFile(name);
 	assert(!empty.isNull && empty.get is null);
 
@@ -315,13 +493,14 @@ unittest { // reading, writing, appending and mapping one file: what is written 
 		fp.string.free(rationed.get);
 		break;
 	}
-	assert(readFile("/tmp").isNull);
+	assert(readFile(directory).isNull);
 
 	// Mapping sees the same bytes; an empty file maps to nothing, and a directory does not map.
 	auto mapped = mapFile(name);
 	assert(!mapped.isNull && mapped.get.bytes == content[]);
+	version(windowsMapping) assert(!writeFile(name, "x") && mapped.get.bytes == content[]);
 	free(mapped.get);
-	assert(mapFile("/tmp").isNull);
+	assert(mapFile(directory).isNull);
 
 	// A writable mapping's changes reach the file through sync and free.
 	auto writable = mapFileWritable(name);
@@ -337,7 +516,7 @@ unittest { // reading, writing, appending and mapping one file: what is written 
 	assert(fp.string.slice(changed.get)[0] == '<' && fp.string.slice(changed.get)[$ - 1] == '>');
 	assert(fp.string.slice(changed.get)[1 .. $ - 1] == content[1 .. $ - 1]);
 	fp.string.free(changed.get);
-	assert(mapFileWritable("/tmp").isNull);
+	assert(mapFileWritable(directory).isNull);
 	for (size_t budget = 0;; ++budget) {
 		auto previous = fp.testing.beginRationedAllocator(budget);
 		auto rationed = mapFileWritable(name);
@@ -360,23 +539,23 @@ unittest { // reading, writing, appending and mapping one file: what is written 
 	auto clearedWritable = mapFileWritable(name);
 	assert(!clearedWritable.isNull && clearedWritable.get.bytes is null);
 	assert(sync(clearedWritable.get) && free(clearedWritable.get));
-	assert(core.stdc.stdio.remove(path.ptr) == 0);
+	assert(removeFile(name) && !removeFile(name));
 	assert(mapFileWritable(name).isNull);
 	assert(appendFile(name, "new") && writeFile(name, "newer"));
 	mapped = mapFile(name);
 	assert(mapped.get.bytes == "newer");
 	free(mapped.get);
 
-	// The read-in-place fallback's free and sync, which WASI and Windows reach through mapping, run here too.
+	// The read-in-place fallback's free and sync, which WASI reaches through mapping, run here too.
 	version(memoryMapping) {
 		auto text = readFile(name);
 		auto readIn = MappedFile(fp.string.slice(text.get), true);
 		free(readIn);
 		assert(readIn.bytes is null);
-		text = readFile(name);
+		auto writableText = readFile(name);
 		char* copiedName = fp.string.makeDynamic(name);
 		assert(copiedName !is null);
-		auto writableReadIn = WritableMappedFile(fp.string.slice(text.get), copiedName);
+		auto writableReadIn = WritableMappedFile(fp.string.slice(writableText.get), copiedName);
 		writableReadIn.bytes[0] = 'N';
 		assert(sync(writableReadIn));
 		writableReadIn.bytes[1] = 'E';
@@ -387,9 +566,32 @@ unittest { // reading, writing, appending and mapping one file: what is written 
 		assert(writeFile(name, "newer"));
 	}
 
+	// A UTF-8 path names the same file everywhere, rather than being read in Windows' ANSI code page.
+	char* unicodePath = fp.string.createFromConcatenation(name, "-é😀");
+	assert(unicodePath !is null);
+	scope(exit) fp.string.free(unicodePath);
+	const unicodeName = fp.string.slice(unicodePath);
+	assert(writeFile(unicodeName, "uni") && appendFile(unicodeName, "code"));
+	auto unicodeText = readFile(unicodeName);
+	assert(!unicodeText.isNull && fp.string.slice(unicodeText.get) == "unicode");
+	fp.string.free(unicodeText.get);
+	auto unicodeMapped = mapFile(unicodeName);
+	assert(!unicodeMapped.isNull && unicodeMapped.get.bytes == "unicode");
+	free(unicodeMapped.get);
+	auto unicodeWritable = mapFileWritable(unicodeName);
+	assert(!unicodeWritable.isNull && unicodeWritable.get.bytes == "unicode");
+	assert(free(unicodeWritable.get));
+	version(Windows) {
+		static import core.sys.windows.winbase;
+		wchar* wideName = fp.string.utf16(unicodeName);
+		assert(wideName !is null);
+		assert(core.sys.windows.winbase.DeleteFileW(wideName));
+		fp.dynarray.free(wideName);
+	} else assert(removeFile(unicodeName));
+
 	// A refused copy of the path writes nothing.
 	auto previous = fp.testing.beginRationedAllocator(0);
-	immutable refused = !writeFile(name, "x") && !appendFile(name, "x") && mapFile(name).isNull && mapFileWritable(name).isNull;
+	immutable refused = !writeFile(name, "x") && !appendFile(name, "x") && !removeFile(name) && mapFile(name).isNull && mapFileWritable(name).isNull;
 	fp.testing.endRationedAllocator(previous);
 	assert(refused);
 	auto unchanged = readFile(name);
@@ -398,4 +600,51 @@ unittest { // reading, writing, appending and mapping one file: what is written 
 
 	assert(readFile("").isNull && readFile("no/such/file").isNull && mapFile("no/such/file").isNull);
 	assert(!writeFile("", "x") && !appendFile("no/such/directory/file", "x"));
+}
+
+unittest { // descriptors: bytes written read back in pieces and whole, line ends untouched, and a descriptor open the wrong way, or not at all, failing
+	static import core.stdc.string;
+	static import fp.testing;
+	char* path = fp.testing.temporaryFile();
+	assert(path !is null);
+	scope(exit) fp.string.free(path);
+	scope(exit) cast(void) removeFile(fp.string.slice(path));
+	auto file = core.stdc.stdio.fopen(path, "w+b");
+	assert(file !is null);
+	scope(exit) cast(void) core.stdc.stdio.fclose(file);
+	immutable fd = core.stdc.stdio.fileno(file);
+
+	static char[100_000] content;
+	foreach (i, ref c; content) c = cast(char) (i % 7 == 0 ? '\n' : 'a' + i % 26);
+	assert(writeAll(fd, content[]) && writeAll(fd, ""));
+	core.stdc.stdio.rewind(file);
+	static char[content.length] back;
+	size_t n = 0;
+	char[4096] piece;
+	for (ptrdiff_t got; (got = readSome(fd, piece[])) > 0; n += got) core.stdc.string.memcpy(back.ptr + n, piece.ptr, got);
+	assert(n == content.length && back[] == content[]);
+	assert(readSome(fd, piece[]) == 0 && readSome(fd, piece[0 .. 0]) == 0);
+
+	// A descriptor the runtime would translate is switched to binary first, and stays so.
+	version(Windows) {
+		enum int textMode = 0x4000;
+		core.stdc.stdio.rewind(file);
+		cast(void) _setmode(fd, textMode);
+		assert(writeSome(fd, "a\r\nb\n") == 5);
+		core.stdc.stdio.rewind(file);
+		cast(void) _setmode(fd, textMode);
+		assert(readSome(fd, piece[0 .. 5]) == 5 && piece[0 .. 5] == "a\r\nb\n");
+		assert(_setmode(fd, binaryMode) == binaryMode);
+	}
+
+	// Open for writing only, it cannot be read; open for reading only, it cannot be written.
+	auto writeOnly = core.stdc.stdio.fopen(path, "ab");
+	assert(writeOnly !is null);
+	scope(exit) cast(void) core.stdc.stdio.fclose(writeOnly);
+	assert(readSome(core.stdc.stdio.fileno(writeOnly), piece[]) == -1);
+	auto readOnly = core.stdc.stdio.fopen(path, "rb");
+	assert(readOnly !is null);
+	scope(exit) cast(void) core.stdc.stdio.fclose(readOnly);
+	assert(writeSome(core.stdc.stdio.fileno(readOnly), "x") == -1 && !writeAll(core.stdc.stdio.fileno(readOnly), "x"));
+	assert(readSome(-1, piece[]) == -1 && writeSome(-1, "x") == -1 && !writeAll(-1, "x"));
 }
