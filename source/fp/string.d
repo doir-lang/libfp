@@ -757,6 +757,42 @@ uint* codepoints(S)(S str) @trusted if (isStringLike!S) {
 	return out_;
 }
 
+/// Converts UTF-8 into a new `fp.dynarray` of UTF-16 code units, which the caller frees with `fp.dynarray.free`. A 0 unit follows the last, outside the length, so the result is also a null-terminated wide string, as Windows' wide APIs take. Returns null if the input is empty or not valid UTF-8, or an allocation was refused.
+///
+/// Examples:
+/// ---
+/// wchar* units = utf16("é😀");
+/// scope(exit) fp.dynarray.free(units);
+/// assert(fp.dynarray.length(units) == 3 && units[0] == 0xE9 && units[1] == 0xD83D && units[2] == 0xDE00 && units[3] == 0);
+/// assert(utf16("\xFF") is null);
+/// ---
+wchar* utf16(S)(S str) @trusted if (isStringLike!S) {
+	const(char)[] view = slice(str);
+	if (view.length == 0) return null;
+	// One more unit than the text needs holds the terminator.
+	size_t units = 1;
+	foreach (c; view) units += utf16Units(c);
+	wchar* out_ = null;
+	if (fp.dynarray.reserve(out_, units) is null) return null;
+
+	size_t i = 0;
+	while (i < view.length) {
+		bool valid;
+		immutable codepoint = decodeUtf8(view, i, valid);
+		bool pushed;
+		if (codepoint < 0x10000) pushed = fp.dynarray.pushBack(out_, cast(wchar) codepoint);
+		else pushed = fp.dynarray.pushBack(out_, cast(wchar) (0xD800 + ((codepoint - 0x10000) >> 10))) && fp.dynarray.pushBack(out_, cast(wchar) (0xDC00 + (codepoint & 0x3FF)));
+		if (!valid || !pushed) {
+			fp.dynarray.free(out_);
+			return null;
+		}
+	}
+	// Valid text needs exactly the units counted, so the terminator's slot is still reserved.
+	assert(fp.dynarray.capacity(out_) > fp.dynarray.length(out_));
+	out_[fp.dynarray.length(out_)] = 0;
+	return out_;
+}
+
 /// Encodes `codepoints` as a new fp string, or returns null if there are none (null is the empty string), one is not encodable, or the string could not be allocated. `codepoints` is a `uint` slice, or a `uint*` fat pointer such as the dynarray `codepoints` returns; like `isStringLike`, a static array must be passed as `array[]`.
 ///
 /// Examples:
@@ -777,6 +813,39 @@ char* fromCodepoints(C)(C codepoints) @trusted if (!__traits(isStaticArray, C) &
 
 	foreach (cp; view) {
 		char[4] temp;
+		immutable len = encodeUtf8(cp, temp.ptr);
+		if (len == 0 || concatenate(out_, temp[0 .. len]) is null) {
+			fp.dynarray.free(out_);
+			return null;
+		}
+	}
+	return out_;
+}
+
+/// Converts UTF-16 code units into a new fp string, or returns null if there are none (null is the empty string), they are not valid UTF-16, such as a lone surrogate, or the string could not be allocated. `units` is a `wchar` slice, or a `wchar*` fat pointer such as the dynarray `utf16` returns; like `isStringLike`, a static array must be passed as `array[]`.
+///
+/// Examples:
+/// ---
+/// char* s = fromUtf16("é😀"w);
+/// scope(exit) free(s);
+/// assert(equal(s, "é😀"));
+/// wchar[1] lone = [0xD800];
+/// assert(fromUtf16(lone[]) is null);
+/// ---
+char* fromUtf16(U)(U units) @trusted if (!__traits(isStaticArray, U) && (is(U : const(wchar)[]) || is(U : const(wchar)*))) {
+	static if (is(U : const(wchar)[])) const(wchar)[] view = units;
+	else const(wchar)[] view = units[0 .. fp.pointer.length(units)];
+	if (view.length == 0) return null;
+
+	char* out_ = null;
+	if (fp.dynarray.reserve(out_, view.length) is null) return null;
+
+	for (size_t i = 0; i < view.length; ++i) {
+		uint cp = view[i];
+		if (cp >= 0xD800 && cp < 0xDC00 && i + 1 < view.length && view[i + 1] >= 0xDC00 && view[i + 1] < 0xE000)
+			cp = 0x10000 + ((cp - 0xD800) << 10) + (view[++i] - 0xDC00);
+		char[4] temp;
+		// A surrogate left unpaired does not encode.
 		immutable len = encodeUtf8(cp, temp.ptr);
 		if (len == 0 || concatenate(out_, temp[0 .. len]) is null) {
 			fp.dynarray.free(out_);
@@ -1107,6 +1176,18 @@ unittest {
 	scope(exit) free(utf8);
 	assert(equal(utf8, "Hello, 世界 café \U0001F600"));
 
+	wchar* units = utf16("Hello, 世界 café \U0001F600");
+	scope(exit) fp.dynarray.free(units);
+	assert(units[0 .. fp.dynarray.length(units)] =="Hello, 世界 café \U0001F600"w && units[fp.dynarray.length(units)] == 0);
+	assert(utf16("") is null && utf16("\xe2\x82") is null && utf16("a\xf0\x9f\x98") is null && utf16("\xed\xa0\x80") is null);
+	char* roundTrip = fromUtf16(units);
+	scope(exit) free(roundTrip);
+	assert(equal(roundTrip, "Hello, 世界 café \U0001F600"));
+	wchar[2] reversed = [0xDE00, 0xD83D];
+	wchar[2] unpaired = ['a', 0xDC00];
+	assert(fromUtf16(reversed[]) is null && fromUtf16(unpaired[]) is null && fromUtf16("a￿"w[0 .. 1]) !is null);
+	assert(fromUtf16((wchar[]).init) is null && fromUtf16(cast(wchar*) null) is null);
+
 	assert(codepoints("\xe2\x82") is null);
 	assert(codepoints("\xf0\x9f\x98") is null);
 	ubyte[1] invalidByte = [0x80];
@@ -1194,6 +1275,12 @@ unittest {
 	// Each first allocation succeeds and a later one is refused, leaving a partial result to free.
 	previous = fp.testing.beginRationedAllocator(1);
 	assert(codepoints("more than four codepoints") is null);
+	fp.testing.endRationedAllocator(previous);
+	previous = fp.testing.beginRationedAllocator(0);
+	assert(utf16("x") is null);
+	fp.testing.endRationedAllocator(previous);
+	previous = fp.testing.beginRationedAllocator(1);
+	assert(fromUtf16("世界"w) is null);
 	fp.testing.endRationedAllocator(previous);
 	uint[2] wide = [0x4E16, 0x754C];
 	previous = fp.testing.beginRationedAllocator(1);
