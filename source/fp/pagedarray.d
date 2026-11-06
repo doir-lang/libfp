@@ -341,7 +341,7 @@ void shrinkToFit(ref PagedArray self) @trusted {
 		fp.dynarray.free(self.pages);
 		return;
 	}
-	fp.dynarray.removeLast(self.pages, have - needed);
+	cast(void)fp.dynarray.removeLast(self.pages, have - needed);
 	if (fp.dynarray.capacity(self.pages) > needed)
 		cast(void)fp.dynarray.shrinkToFit(self.pages);
 }

@@ -321,7 +321,7 @@ bool pushFront(T)(ref T* array, T value) {
 	return insert(array, 0, value);
 }
 
-/// Appends a copy of every element of `source`, which may view `destination` itself. Returns false if the array could not grow or its length would overflow, leaving it unchanged.
+/// Appends a copy of every element of `source`, which may view `destination` itself. Returns false if the array could not grow or its length would overflow, leaving it unchanged, or an element's copy was refused, ending the elements copied before the failure and restoring the previous length, though the capacity may still have grown.
 ///
 /// Examples:
 /// ---
@@ -344,7 +344,11 @@ bool concatenate(T)(ref T* destination, inout(T)[] source) @trusted {
 	immutable ptrdiff_t selfOffset = overlaps(destination, source) ? source.ptr - destination : -1;
 	if (overflow || maybeGrow(destination, newSize, true, false) is null) return false;
 	const(T)* from = selfOffset >= 0 ? destination + selfOffset : source.ptr;
-	fp.lifecycle.copyRange(destination + preSize, cast(T*) from, source.length);
+	if (!fp.lifecycle.copyRange(destination + preSize, cast(T*) from, source.length)) {
+		fp.lifecycle.endLifetimes(destination + preSize, source.length); // the ones copied before the failure, the rest already empty
+		headerOf(destination).base.size = preSize;
+		return false;
+	}
 	return true;
 }
 // wrapper: takes a fat pointer where the other overload takes a slice
@@ -372,7 +376,7 @@ T* create(T)(size_t size) {
 	return array;
 }
 
-/// Copies `source`'s elements into `destination`, with at least `source`'s capacity unless `shrink` is set or `source` is a fat pointer other than a dynarray. Elements `destination` held past `source`'s length are dropped, their lifetimes ended. Returns false if `destination` could not be sized to hold them, leaving it unchanged.
+/// Copies `source`'s elements into `destination`, with at least `source`'s capacity unless `shrink` is set or `source` is a fat pointer other than a dynarray. Elements `destination` held past `source`'s length are dropped, their lifetimes ended. Returns false if `destination` could not be sized to hold them, leaving it unchanged, or one of the copies was refused, leaving `destination` empty.
 ///
 /// Examples:
 /// ---
@@ -396,7 +400,11 @@ bool cloneTo(T)(ref T* destination, inout T* source, bool shrink = false) @trust
 	if (previousSize > sourceLength) fp.lifecycle.endLifetimes(destination + sourceLength, previousSize - sourceLength);
 	headerOf(destination).base.size = sourceLength; // `growToSize` raises the length to the capacity, which for a dynarray is usually more than the elements copied.
 	if (self) return true; // growing already moved the elements over
-	fp.lifecycle.copyRange(destination, cast(T*) source, sourceLength);
+	if (!fp.lifecycle.copyRange(destination, cast(T*) source, sourceLength)) {
+		fp.lifecycle.endLifetimes(destination, sourceLength); // the elements copied before the failure; the rest are already empty
+		headerOf(destination).base.size = 0;
+		return false;
+	}
 	return true;
 }
 
@@ -977,6 +985,29 @@ unittest {
 	assert(pushBack(longer, Handle(cast(int*) 7)) && pushBack(longer, Handle(cast(int*) 8)) && pushBack(longer, Handle(cast(int*) 9)));
 	assert(cloneTo(longer, array));
 	assert(length(longer) == 2 && longer[0].data == cast(int*) 3 && longer[1].data == cast(int*) 6 && finalizeCount == 7);
+
+	// A deep copy refused partway reports false, ends the elements it did copy, and leaves the container as it was.
+	static int deepEnded = 0;
+	static struct Deep {
+		int* data;
+		bool copyTo(ref Deep destination) @nogc nothrow { destination.data = fp.pointer.allocate!int(1); return destination.data !is null; }
+		void finalize() @nogc nothrow { if (data !is null) { fp.pointer.free(data); ++deepEnded; } }
+	}
+	Deep* deep = null;
+	scope(exit) free(deep);
+	assert(pushBack(deep, Deep(null)) && pushBack(deep, Deep(null)));
+	Deep* roomy = null;
+	scope(exit) free(roomy);
+	assert(reserve(roomy, 8) !is null && pushBack(roomy, Deep(null)) && length(roomy) == 1);
+	deepEnded = 0;
+	auto oneCopy = fp.testing.limitAllocations(1); // only the first deep copy is granted
+	assert(!concatenate(roomy, deep));
+	assert(length(roomy) == 1 && roomy[0].data is null && deepEnded == 1); // the copied element was ended, the length restored
+	assert(!cloneTo(roomy, deep, true));
+	assert(length(roomy) == 0 && deepEnded == 1);
+	fp.testing.restoreAllocator(oneCopy);
+	assert(concatenate(roomy, deep) && length(roomy) == 2 && roomy[0].data !is null);
+	assert(cloneTo(roomy, deep) && length(roomy) == 2);
 
 	assert(removeLast(array, 1) is array + 1);
 	assert(finalizeCount == 8 && array[0].data == cast(int*) 3);

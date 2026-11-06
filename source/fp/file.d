@@ -70,7 +70,7 @@ private core.stdc.stdio.FILE* open(const(char)[] path, const(char)* mode) @trust
 std.typecons.Nullable!(char*) readFile(const(char)[] path) {
 	auto f = open(path, "rb");
 	if (f is null) return typeof(return).init;
-	scope(exit) core.stdc.stdio.fclose(f);
+	scope(exit) cast(void) core.stdc.stdio.fclose(f); // reading only: a failed close changes nothing here
 	// Read straight into the string, since a buffer of any useful size would overflow WASI's 64 KiB stack.
 	size_t chunk = 65536;
 	// Sized from the file's length where it has one, with a byte to spare so one read also meets the end.

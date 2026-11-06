@@ -291,7 +291,7 @@ private void* insertImpl(T)(ref T* table, inout(ubyte)[] key, size_t failures, C
 	return slots + key.length * position;
 }
 
-/// A new table with the same config as `source` holding a copy of every key in it, or null if `source` is not a table or the allocator refused. Keys are copied through `fp.lifecycle.copyInto`, so a key type that owns something deep-copies it and `source` keeps its own.
+/// A new table with the same config as `source` holding a copy of every key in it, or null if `source` is not a table, the allocator refused, or a key's copy was refused. Keys are copied through `fp.lifecycle.copyInto`, so a key type that owns something deep-copies it and `source` keeps its own.
 ///
 /// Examples:
 /// ---
@@ -311,7 +311,10 @@ T* clone(T)(inout T* source) {
 		if (!entryOccupied(source, i)) continue;
 		// The copy is hashed before it is placed, so a key whose copy differs in bytes still lands in the neighborhood its own hash selects.
 		T copy;
-		fp.lifecycle.copyInto(copy, *cast(T*)(sourceSlots + i * T.sizeof));
+		if (!fp.lifecycle.copyInto(copy, *cast(T*)(sourceSlots + i * T.sizeof))) {
+			free(fresh); // the keys placed so far are finalized with the table
+			return null;
+		}
 		ubyte* key = cast(ubyte*)&copy;
 		if (insertImpl(fresh, key[0 .. T.sizeof], 0, &moveSlot!T) is null) {
 			fp.lifecycle.discardCopy(copy); // the copy was never placed, so the call must end it
@@ -994,6 +997,27 @@ unittest {
 	assert(finalizeCallCount == 2); // the copy the fresh table took, and the one it had no room for
 	free(crowded);
 	assert(finalizeCallCount == 5 && crowded is null);
+
+	// A clone whose key copy is refused frees the fresh table, ending the keys already placed in it.
+	static struct CopyAllocating {
+		int id;
+		int* data;
+		void finalize() @nogc nothrow { if (data !is null) { fp.pointer.free(data); ++finalizeCallCount; } data = null; }
+		bool copyTo(ref CopyAllocating destination) @nogc nothrow { destination.data = fp.pointer.allocate!int(1); return destination.data !is null; }
+	}
+	Config copying;
+	copying.hashFunction = &identityHash;
+	CopyAllocating* copySource = create!CopyAllocating(copying);
+	assert(copySource !is null);
+	foreach (id; [1, 2, 3])
+		assert(insert(copySource, CopyAllocating(id, null)) !is null);
+	finalizeCallCount = 0;
+	auto freshPlusTwoCopies = fp.testing.limitAllocations(4); // the fresh table and its slot info, then two keys, then the third copy refused
+	assert(clone(copySource) is null);
+	fp.testing.restoreAllocator(freshPlusTwoCopies);
+	assert(finalizeCallCount == 2); // the two keys the fresh table held before the third copy was refused
+	free(copySource);
+	assert(finalizeCallCount == 2 && copySource is null);
 
 	// A key the table does not keep — already there, or no room for it — has its lifetime ended by the call.
 	finalizeCallCount = 0;
