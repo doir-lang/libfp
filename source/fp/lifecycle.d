@@ -53,24 +53,22 @@ private template hasDestructor(T) { enum hasDestructor = declares!(T, "__xdtor")
 private template hasPostblit(T) { enum hasPostblit = declares!(T, "__postblit"); }
 private template hasOwnDestructor(T) { enum hasOwnDestructor = declares!(T, "__dtor"); }
 
-// A struct or static array with no hook of its own but a part that has one: its lifetime is its parts', one by one.
-private template composed(T) {
-	static if (is(T == struct))
-		enum composed = !isBitMoveable!T && !hasFinalize!T && !hasOwnDestructor!T;
-	else static if (is(T == U[N], U, size_t N))
-		enum composed = !isBitMoveable!U;
-	else
-		enum composed = false;
-}
-
-// Like `composed`, for copying: such a struct copies through its parts unless it copies itself.
-private template copiesByParts(T) {
-	static if (is(T == struct))
-		enum copiesByParts = composed!T && !hasCopyTo!T && !hasPostblit!T;
-	else static if (is(T == U[N], U, size_t N))
-		enum copiesByParts = !isBitMoveable!U;
-	else
-		enum copiesByParts = false;
+/// Whether `T`'s lifetime is exactly its bytes, so every operation on it is a `memcpy`: no `finalize`, `moveTo`, `copyTo`, postblit or destructor, and no member that has one.
+///
+/// Examples:
+/// ---
+/// static assert(isBitMoveable!long && isBitMoveable!(char[8]));
+/// struct Owned { int* data; void finalize() @nogc nothrow { data = null; } }
+/// static assert(!isBitMoveable!Owned);
+/// ---
+template isBitMoveable(T) {
+	static if (is(T == struct)) {
+		enum isBitMoveable = !hasFinalize!T && !hasMoveTo!T && !hasCopyTo!T && !hasDestructor!T && !hasPostblit!T && membersBitMoveable!(T);
+	} else static if (is(T == U[N], U, size_t N)) {
+		enum isBitMoveable = isBitMoveable!U;
+	} else {
+		enum isBitMoveable = true;
+	}
 }
 
 // A member that is not an expression, like a type alias in an opaque C struct, is not a field and holds no lifetime.
@@ -90,22 +88,24 @@ private template membersBitMoveable(T, size_t i = 0) {
 		enum membersBitMoveable = false;
 }
 
-/// Whether `T`'s lifetime is exactly its bytes, so every operation on it is a `memcpy`: no `finalize`, `moveTo`, `copyTo`, postblit or destructor, and no member that has one.
-///
-/// Examples:
-/// ---
-/// static assert(isBitMoveable!long && isBitMoveable!(char[8]));
-/// struct Owned { int* data; void finalize() @nogc nothrow { data = null; } }
-/// static assert(!isBitMoveable!Owned);
-/// ---
-template isBitMoveable(T) {
-	static if (is(T == struct)) {
-		enum isBitMoveable = !hasFinalize!T && !hasMoveTo!T && !hasCopyTo!T && !hasDestructor!T && !hasPostblit!T && membersBitMoveable!(T);
-	} else static if (is(T == U[N], U, size_t N)) {
-		enum isBitMoveable = isBitMoveable!U;
-	} else {
-		enum isBitMoveable = true;
-	}
+// A struct or static array with no hook of its own but a part that has one: its lifetime is its parts', one by one.
+private template composed(T) {
+	static if (is(T == struct))
+		enum composed = !isBitMoveable!T && !hasFinalize!T && !hasOwnDestructor!T;
+	else static if (is(T == U[N], U, size_t N))
+		enum composed = !isBitMoveable!U;
+	else
+		enum composed = false;
+}
+
+// Like `composed`, for copying: such a struct copies through its parts unless it copies itself.
+private template copiesByParts(T) {
+	static if (is(T == struct))
+		enum copiesByParts = composed!T && !hasCopyTo!T && !hasPostblit!T;
+	else static if (is(T == U[N], U, size_t N))
+		enum copiesByParts = !isBitMoveable!U;
+	else
+		enum copiesByParts = false;
 }
 
 /// Makes `count` slots at `p` fit to hold elements: does nothing when their lifetime is their bytes, zeroes them otherwise, so a spare slot is always empty.
@@ -321,24 +321,30 @@ void moveRange(T)(T* destination, T* source, size_t count) @trusted {
 
 /// Copies `count` elements from `source` into `destination`, ending the lifetimes `destination` held. The ranges must not overlap.
 ///
+/// Returns false at the first element whose copy was refused, leaving the ones copied so far copied and that element empty; the elements after it are untouched.
+///
 /// Examples:
 /// ---
-/// struct Owned { int* data; void copyTo(ref Owned destination) @nogc nothrow { destination.data = data; } }
+/// struct Owned { int* data; bool copyTo(ref Owned destination) @nogc nothrow { destination.data = data; return true; } }
 /// Owned[2] source, destination;
 /// source[0].data = cast(int*) 1;
-/// copyRange(destination.ptr, source.ptr, 1);
+/// assert(copyRange(destination.ptr, source.ptr, 1));
 /// assert(destination[0].data == cast(int*) 1);
 /// ---
-void copyRange(T)(T* destination, T* source, size_t count) @trusted {
-	static if (isBitMoveable!T) core.stdc.string.memcpy(destination, source, T.sizeof * count);
-	else foreach (i; 0 .. count) copyInto(destination[i], source[i]);
+bool copyRange(T)(T* destination, T* source, size_t count) @trusted {
+	static if (isBitMoveable!T) {
+		core.stdc.string.memcpy(destination, source, T.sizeof * count);
+		return true;
+	} else {
+		foreach (i; 0 .. count) if (!copyInto(destination[i], source[i])) return false;
+		return true;
+	}
 }
 
 /// A hook that ends one element's lifetime from its bytes, for a container holding elements without knowing their type.
 alias Finalizer = void function(inout ubyte[]);
 
-// wrapper: adapts endLifetime to Finalizer
-// Ends the lifetime of the `T` stored in `slot`.
+// wrapper: adapts endLifetime to Finalizer, the hook a container needs to end an element whose type it does not know
 private void finalizeSlot(T)(inout ubyte[] slot) @trusted { endLifetime(*cast(T*) slot.ptr); }
 
 /// The `Finalizer` for `T`: null when its lifetime is its bytes, otherwise one that ends it with its `finalize` or `~this`.
@@ -470,13 +476,35 @@ private T* cloneOwned(T)(T* p) @trusted {
 		case fp.pointer.PointerType.heap: {
 			immutable n = fp.pointer.length(p);
 			T* copy = fp.pointer.allocate!T(n);
-			if (copy !is null) copyRange(copy, p, n);
+			if (copy is null) return null;
+			if (!copyRange(copy, p, n)) { fp.pointer.free(copy); return null; }
 			return copy;
 		}
 		case fp.pointer.PointerType.dynarray: return fp.dynarray.clone(p);
 		case fp.pointer.PointerType.hashTable: return fp.hashtable.clone(p);
 		default: return null;
 	}
+}
+
+// How many elements the libfp container `p` holds, 0 for null or memory libfp did not allocate.
+private size_t ownedCount(T)(const(T)* p) @trusted {
+	// A pointer to a const struct does not convert to the `inout(void*)` the queries take, though one to a const scalar does.
+	auto raw = cast(const(void)*) p;
+	switch (fp.pointer.pointerType(raw)) {
+		case fp.pointer.PointerType.hashTable: {
+			size_t n = 0;
+			foreach (x; fp.hashtable.occupied(p)) ++n;
+			return n;
+		}
+		case fp.pointer.PointerType.heap: case fp.pointer.PointerType.stack: return fp.pointer.length(raw);
+		case fp.pointer.PointerType.dynarray: return fp.dynarray.length(raw);
+		default: return 0;
+	}
+}
+
+// The elements of the libfp allocation or dynarray `p`, in order.
+private const(T)[] ownedElements(T)(const(T)* p) @trusted {
+	return p is null ? null : p[0 .. ownedCount(p)];
 }
 
 /// An owning handle to a libfp container, for when a container should release its `fp.pointer`, `fp.dynarray` or `fp.hashtable` elements as it is itself freed or shrunk. It is a plain `T*` with the hooks above: `finalize` frees what it points at, `moveTo` transfers the pointer, and `copyTo` deep-copies it. `alias p this` keeps it usable wherever a `T*` is.
@@ -511,8 +539,8 @@ struct Owned(T) {
 	/// auto a = Owned!char(fp.string.clone("hi")), b = Owned!char(fp.string.clone("hi"));
 	/// scope(exit) { a.finalize(); b.finalize(); }
 	/// Owned!char none, empty = Owned!char(fp.dynarray.create!char(0));
-/// scope(exit) empty.finalize();
-/// assert(Owned!char.equal(a, b) && Owned!char.equal(none, empty));
+	/// scope(exit) empty.finalize();
+	/// assert(Owned!char.equal(a, b) && Owned!char.equal(none, empty));
 	/// ---
 	static bool equal(ref const Owned a, ref const Owned b) @nogc nothrow @trusted {
 		if (a.p is b.p) return true;
@@ -550,27 +578,6 @@ struct Owned(T) {
 		foreach (ref x; ownedElements(a.p)) hash = fp.algorithms.combine(hash, .contentHash(x));
 		return cast(size_t) hash;
 	}
-}
-
-// How many elements the libfp container `p` holds, 0 for null or memory libfp did not allocate.
-private size_t ownedCount(T)(const(T)* p) @trusted {
-	// A pointer to a const struct does not convert to the `inout(void*)` the queries take, though one to a const scalar does.
-	auto raw = cast(const(void)*) p;
-	switch (fp.pointer.pointerType(raw)) {
-		case fp.pointer.PointerType.hashTable: {
-			size_t n = 0;
-			foreach (x; fp.hashtable.occupied(p)) ++n;
-			return n;
-		}
-		case fp.pointer.PointerType.heap: case fp.pointer.PointerType.stack: return fp.pointer.length(raw);
-		case fp.pointer.PointerType.dynarray: return fp.dynarray.length(raw);
-		default: return 0;
-	}
-}
-
-// The elements of the libfp allocation or dynarray `p`, in order.
-private const(T)[] ownedElements(T)(const(T)* p) @trusted {
-	return p is null ? null : p[0 .. ownedCount(p)];
 }
 
 
@@ -633,7 +640,7 @@ unittest {
 	source.p = cast(int*) 2;
 	OnlyCopy destination;
 	destination.p = cast(int*) 3;
-	copyInto(destination, source);
+	assert(copyInto(destination, source));
 	assert(destination.p == source.p); // `copyTo` ran, replacing `destination`'s own value
 
 	struct FailingCopy {
@@ -694,7 +701,7 @@ unittest {
 	from.data = cast(int*) 1;
 	to.data = cast(int*) 2;
 	finalizeCount = 0;
-	copyInto(to, from);
+	assert(copyInto(to, from));
 	assert(to.data == cast(int*) 1 && finalizeCount == 1);
 
 	// A postblit runs on assignment, so a copy of `Deep` is deep.
@@ -702,7 +709,7 @@ unittest {
 	a.data = cast(int*) 1;
 	b.data = cast(int*) 2;
 	finalizeCount = 0;
-	copyInto(b, a);
+	assert(copyInto(b, a));
 	assert(b.data == cast(int*) 1 && finalizeCount == 1);
 
 	// A type with both `finalize` and `~this` is ended by `finalize`, not by the destructor assignment would run.
@@ -715,11 +722,11 @@ unittest {
 	live.data = cast(int*) 3;
 	fresh.data = cast(int*) 4;
 	finalizeCount = 0;
-	copyInto(live, fresh);
+	assert(copyInto(live, fresh));
 	assert(finalizeCount == 1 && live.data == cast(int*) 4);
 
 	int x = 1, y = 2;
-	copyInto(y, x);
+	assert(copyInto(y, x));
 	assert(y == 1);
 }
 
@@ -778,8 +785,17 @@ unittest {
 	Counted[2] copyDestination;
 	copyDestination[0].data = cast(int*) 30;
 	finalizeCount = 0;
-	copyRange(copyDestination.ptr, destination.ptr, 2);
+	assert(copyRange(copyDestination.ptr, destination.ptr, 2));
 	assert(finalizeCount == 1 && copyDestination[0].data == cast(int*) 1 && copyDestination[1].data == cast(int*) 2);
+
+	struct PartlyFailing {
+		int* p;
+		bool copyTo(ref PartlyFailing to) @nogc nothrow { to.p = p; return p !is null; }
+	}
+	PartlyFailing[2] failing = [PartlyFailing(cast(int*) 40), PartlyFailing(null)];
+	PartlyFailing[2] partial;
+	assert(!copyRange(partial.ptr, failing.ptr, 2)); // stops at the refused copy
+	assert(partial[0].p == cast(int*) 40 && partial[1].p is null);
 
 	int[3] ints = [1, 2, 3];
 	int[3] out_;
@@ -800,7 +816,7 @@ unittest {
 	assert(o.p is null && moved.p !is null && moved[2] == 3);
 
 	Owned!int copied;
-	copyInto(copied, moved);
+	assert(copyInto(copied, moved));
 	assert(copied.p !is moved.p && copied[0] == 1 && copied[2] == 3);
 	endLifetime(copied);
 	assert(copied.p is null);
@@ -809,7 +825,7 @@ unittest {
 	Owned!int dyn = Owned!int(fp.dynarray.create!int(2));
 	assert(dyn.p !is null && fp.dynarray.length(dyn.p) == 2);
 	Owned!int dynTwin;
-	copyInto(dynTwin, dyn);
+	assert(copyInto(dynTwin, dyn));
 	assert(dynTwin.p !is dyn.p && fp.dynarray.length(dynTwin.p) == 2);
 	endLifetime(dynTwin);
 	endLifetime(dyn);
@@ -820,7 +836,7 @@ unittest {
 	stackArray[0] = 1;
 	Owned!int borrowed = Owned!int(stackArray.ptr);
 	Owned!int notCopied;
-	copyInto(notCopied, borrowed); // memory libfp did not allocate is neither copied nor released
+	assert(!copyInto(notCopied, borrowed)); // memory libfp did not allocate is neither copied nor released
 	assert(notCopied.p is null && stackArray[0] == 1);
 	endLifetime(borrowed);
 	assert(borrowed.p is null && stackArray[0] == 1);
@@ -831,7 +847,7 @@ unittest {
 	assert(fp.hashtable.insert(table, 7) !is null);
 	Owned!int owner = Owned!int(table);
 	Owned!int twin;
-	copyInto(twin, owner);
+	assert(copyInto(twin, owner));
 	assert(twin.p !is owner.p && fp.hashtable.contains(twin.p, 7));
 	assert(equal(twin, owner) && contentHash(twin) == contentHash(owner));
 	endLifetime(twin);
@@ -909,7 +925,7 @@ unittest { // a struct without hooks of its own ends, copies and discards throug
 	a.view.data = cast(int*) 3;
 
 	Whole b;
-	copyInto(b, a);
+	assert(copyInto(b, a));
 	assert(copied == 3 && b.plain == 1 && b.part.data == cast(int*) 1 && b.view.data == cast(int*) 3);
 	discardCopy(b); // the deep-copied parts are ended, the aliasing one only zeroed
 	assert(ended == 2 && b.part.data is null && b.view.data is null);
