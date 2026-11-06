@@ -17,11 +17,11 @@ page = os.path.join(root, 'tests', 'wasi')
 compiler = os.environ.get('DC', 'ldc2')
 wasm = os.path.join(out, 'libfp-tests.wasm')
 
-sdkVersion = '34'
-release = f'https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-{sdkVersion}/'
+sdk_version = '34'
+release = f'https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-{sdk_version}/'
 target = 'wasm32-wasip1-threads'
 # Must match maximumPages in tests/wasi/main.mjs, which creates the shared memory the module imports.
-maxMemory = 16384 * 65536
+maximum_memory = 16384 * 65536
 packages = ['@bjorn3/browser_wasi_shim@0.4.2', '@emnapi/wasi-threads@2.2.0']
 
 
@@ -40,9 +40,10 @@ def fetch(name):
 
 
 def build():
-	sysroot = os.environ.get('WASI_SYSROOT') or fetch(f'wasi-sysroot-{sdkVersion}.0')
+	"""Builds the wasm test binary into bin/wasi and copies the page scripts beside it."""
+	sysroot = os.environ.get('WASI_SYSROOT') or fetch(f'wasi-sysroot-{sdk_version}.0')
 	builtins = os.environ.get('WASI_BUILTINS') or os.path.join(
-		fetch(f'libclang_rt-{sdkVersion}.0'), 'wasm32-unknown-wasip1-threads', 'libclang_rt.builtins.a')
+		fetch(f'libclang_rt-{sdk_version}.0'), 'wasm32-unknown-wasip1-threads', 'libclang_rt.builtins.a')
 	libs = os.path.join(sysroot, 'lib', target)
 
 	sources = [os.path.join('source', 'fp', f) for f in sorted(os.listdir(os.path.join(root, 'source', 'fp'))) if f.endswith('.d')]
@@ -51,17 +52,17 @@ def build():
 		'-Isource', '-Itests', '-od=' + out, *sources, os.path.join('tests', 'runner.d')]
 	# The long-double archive replaces libc's printf, so it must come first; D's `real` is a 128-bit long double here.
 	# @emnapi/wasi-threads calls the exported malloc and free to pass each spawned thread its id.
-	linkArgs = [os.path.join(libs, 'crt1-command.o'), '-L' + libs, '-lc-printscan-long-double', '-lc', builtins,
-		'--import-memory', '--export-memory', '--shared-memory', f'--max-memory={maxMemory}',
+	link_arguments = [os.path.join(libs, 'crt1-command.o'), '-L' + libs, '-lc-printscan-long-double', '-lc', builtins,
+		'--import-memory', '--export-memory', '--shared-memory', f'--max-memory={maximum_memory}',
 		'--export=malloc', '--export=free']
 
 	linker = os.environ.get('WASM_LD') or shutil.which('wasm-ld')
 	if linker:
 		obj = os.path.join(out, 'libfp-tests.o')
 		subprocess.run([*compile, '-c', '-of=' + obj], cwd=root, check=True)
-		subprocess.run([linker, '-o', wasm, *linkArgs, obj], cwd=root, check=True)
+		subprocess.run([linker, '-o', wasm, *link_arguments, obj], cwd=root, check=True)
 	else:
-		subprocess.run([*compile, '--link-internally', '-of=' + wasm, *('-L' + a for a in linkArgs)], cwd=root, check=True)
+		subprocess.run([*compile, '--link-internally', '-of=' + wasm, *('-L' + a for a in link_arguments)], cwd=root, check=True)
 
 	for f in os.listdir(page):
 		shutil.copy(os.path.join(page, f), out)
@@ -78,12 +79,14 @@ def install():
 class IsolatedHandler(http.server.SimpleHTTPRequestHandler):
 	"""Serves with the headers that make a page cross-origin isolated, without which a browser offers no shared memory."""
 	def end_headers(self):
+		"""Adds the cross-origin isolation headers, then ends the header block."""
 		self.send_header('Cross-Origin-Opener-Policy', 'same-origin')
 		self.send_header('Cross-Origin-Embedder-Policy', 'require-corp')
 		super().end_headers()
 
 
 def serve(port):
+	"""Serves bin/wasi on `port` until interrupted."""
 	handler = functools.partial(IsolatedHandler, directory=out)
 	with http.server.ThreadingHTTPServer(('localhost', port), handler) as server:
 		print(f'open http://localhost:{port}/ to run the tests (Ctrl+C stops the server)', file=sys.stderr)
@@ -93,11 +96,13 @@ def serve(port):
 			pass
 
 
-def runNode():
+def run_node():
+	"""Runs the page script under Node and returns the tests' exit status."""
 	return subprocess.run(['node', os.path.join(out, 'node.mjs'), wasm]).returncode
 
 
 def main():
+	"""Parses the command line, builds, then serves or runs the tests as asked."""
 	parser = argparse.ArgumentParser(description=__doc__.split('\n')[0])
 	mode = parser.add_mutually_exclusive_group()
 	mode.add_argument('--serve', nargs='?', const=8000, type=int, metavar='PORT', help='serve the test page for a browser')
@@ -108,7 +113,7 @@ def main():
 	if args.serve:
 		serve(args.serve)
 	elif args.node:
-		sys.exit(runNode())
+		sys.exit(run_node())
 
 
 if __name__ == '__main__':

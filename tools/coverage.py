@@ -33,6 +33,7 @@ def relative_to_root(path):
 
 
 def build_and_run():
+	"""Builds the unittests as plain D with -cov and runs them from the root, leaving the listings in bin/coverage; exits if the build or a test fails."""
 	import_paths = [relative_to_root(p) for p in describe('--import-paths')]
 	sources = [relative_to_root(p) for p in describe('--data=source-files', '--data-list')]
 	if not import_paths or not sources:
@@ -81,6 +82,7 @@ def read_listings():
 
 
 def report(files, verbose):
+	"""Prints each file's coverage and the total, and every uncovered line if `verbose`."""
 	all_covered = all_total = 0
 	for name, counts in files.items():
 		missed = sorted(n for n, (hits, _) in counts.items() if hits == 0)

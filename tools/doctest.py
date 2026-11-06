@@ -45,6 +45,7 @@ def ddoc_blocks(lines):
 
 
 def is_function(decl):
+	"""Whether the declaration `decl` starts a function or function template, which must have an example."""
 	if decl.startswith(('struct', 'enum', 'alias', 'module', 'package struct', 'package enum')):
 		return decl.startswith('struct') and '(' in decl.split('{')[0]
 	if '=' in decl.split('(')[0]:
@@ -54,6 +55,7 @@ def is_function(decl):
 
 
 def check(path, lines, problems, examples):
+	"""Appends to `problems` each definition in `lines` missing documentation, or an example if it is a function, and to `examples` each `---` example as (first line, code lines, whether it documents a `package` definition)."""
 	documented = set()
 	for end, body in ddoc_blocks(lines):
 		j = end
@@ -98,6 +100,7 @@ def check(path, lines, problems, examples):
 
 
 def main():
+	"""Generates a unittest module per documented module, builds them with the sources under -betterC and runs them, then reports the documentation problems; returns the exit status."""
 	os.makedirs(out, exist_ok=True)
 	for old in glob.glob(os.path.join(out, '*.d')):
 		os.remove(old)
@@ -153,6 +156,7 @@ def main():
 
 
 def modules_in(sources):
+	"""Returns the module name each file in `sources` declares."""
 	return [re.search(r'^module\s+([\w.]+);', open(p, encoding='utf-8').read(), re.M).group(1) for p in sources]
 
 

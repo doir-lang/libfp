@@ -4,17 +4,17 @@
 ///
 /// Examples:
 /// ---
-/// PagedArrayOf!int arr = create!int();
-/// scope(exit) free(arr);
-/// assert(pushBack(arr, 1));
-/// int* first = &arr[0];
+/// PagedArrayOf!int array = create!int();
+/// scope(exit) free(array);
+/// assert(pushBack(array, 1));
+/// int* first = &array[0];
 /// foreach (i; 0 .. 5000)
-/// 	assert(pushBack(arr, i));
-/// assert(&arr[0] is first);
+/// 	assert(pushBack(array, i));
+/// assert(&array[0] is first);
 /// ---
 module fp.pagedarray;
 
-import core.stdc.string;
+static import core.stdc.string;
 static import core.checkedint;
 
 static import fp.dynarray;
@@ -30,17 +30,17 @@ private enum size_t swapScratchBytes = 64;
 
 /// Plain data with no methods: every operation is a free function, taking the array by `ref` when it changes it and by value when it only reads it. `free` is the only one that releases what it owns. Copying one copies a handle to the same pages, not the elements.
 ///
-/// Element lifetimes are ended by the `finalizeFunction` the array stores, which `create!T` sets from the element type; an array made with `create(elementSize)` has none, so its elements are treated as bytes.
+/// Element lifetimes are ended by the `finalizer` the array stores, which `create!T` sets from the element type; an array made with `create(elementSize)` has none, so its elements are treated as bytes.
 ///
 /// Examples:
 /// ---
-/// PagedArray arr = create(8);
-/// scope(exit) free(arr);
-/// assert(arr.elementSize == 8 && empty(arr));
+/// PagedArray array = create(8);
+/// scope(exit) free(array);
+/// assert(array.elementSize == 8 && empty(array));
 /// ---
 struct PagedArray {
 	size_t elementSize = 0; /// Bytes per element.
-	fp.lifecycle.FinalizeFunction finalizeFunction = null; /// Ends an element's lifetime when it is popped, cleared or freed; null when its lifetime is its bytes.
+	fp.lifecycle.Finalizer finalizer = null; /// Ends an element's lifetime when it is popped, cleared or freed; null when its lifetime is its bytes.
 	private size_t pageShift = 0;
 	private size_t count = 0;
 	private ubyte** pages = null; // dynarray of page pointers
@@ -50,28 +50,27 @@ struct PagedArray {
 @nogc nothrow:
 
 
+// wrapper: reads a private field
 /// The number of elements.
 ///
 /// Examples:
 /// ---
-/// PagedArrayOf!int arr = create!int();
-/// scope(exit) free(arr);
-/// assert(pushBack(arr, 1) && pushBack(arr, 2));
-/// assert(length(arr) == 2);
+/// PagedArrayOf!int array = create!int();
+/// scope(exit) free(array);
+/// assert(pushBack(array, 1) && pushBack(array, 2));
+/// assert(length(array) == 2);
 /// ---
 size_t length(const PagedArray self) { return self.count; }
-/// Ditto
-alias size = length;
 
 /// Whether the array holds no elements.
 ///
 /// Examples:
 /// ---
-/// PagedArrayOf!int arr = create!int();
-/// scope(exit) free(arr);
-/// assert(empty(arr));
-/// assert(pushBack(arr, 1));
-/// assert(!empty(arr));
+/// PagedArrayOf!int array = create!int();
+/// scope(exit) free(array);
+/// assert(empty(array));
+/// assert(pushBack(array, 1));
+/// assert(!empty(array));
 /// ---
 bool empty(const PagedArray self) { return self.count == 0; }
 
@@ -79,10 +78,10 @@ bool empty(const PagedArray self) { return self.count == 0; }
 ///
 /// Examples:
 /// ---
-/// PagedArrayOf!int arr = create!int(16);
-/// scope(exit) free(arr);
-/// assert(pushBack(arr, 1));
-/// assert(capacity(arr) == 4);
+/// PagedArrayOf!int array = create!int(16);
+/// scope(exit) free(array);
+/// assert(pushBack(array, 1));
+/// assert(capacity(array) == 4);
 /// ---
 size_t capacity(const PagedArray self) @trusted {
 	return fp.dynarray.length(cast(ubyte**) self.pages) << self.pageShift;
@@ -92,8 +91,8 @@ size_t capacity(const PagedArray self) @trusted {
 ///
 /// Examples:
 /// ---
-/// PagedArrayOf!int arr = create!int(16);
-/// assert(pageElements(arr) == 4);
+/// PagedArrayOf!int array = create!int(16);
+/// assert(pageElements(array) == 4);
 /// ---
 size_t pageElements(const PagedArray self) { return size_t(1) << self.pageShift; }
 
@@ -102,10 +101,10 @@ size_t pageElements(const PagedArray self) { return size_t(1) << self.pageShift;
 ///
 /// Examples:
 /// ---
-/// PagedArray arr = create(int.sizeof);
-/// scope(exit) free(arr);
-/// assert(pushBack(arr, 7));
-/// assert(*cast(int*) get(arr, 0) == 7);
+/// PagedArray array = create(int.sizeof);
+/// scope(exit) free(array);
+/// assert(pushBack(array, 7));
+/// assert(*cast(int*) get(array, 0) == 7);
 /// ---
 void* get(ref PagedArray self, size_t i) @trusted {
 	assert(i < self.count);
@@ -119,23 +118,23 @@ const(void)* get(const PagedArray self, size_t i) @trusted {
 
 // Ends the lifetimes of elements `start` .. `end`, which are spread over pages.
 private void endLifetimes(ref PagedArray self, size_t start, size_t end) @trusted {
-	if (self.finalizeFunction is null) return;
+	if (self.finalizer is null) return;
 	for (size_t i = start; i < end; ++i) {
 		ubyte* slot = cast(ubyte*) get(self, i);
-		self.finalizeFunction(cast(inout(ubyte)[]) slot[0 .. self.elementSize]);
+		self.finalizer(cast(inout(ubyte)[]) slot[0 .. self.elementSize]);
 	}
 }
 
 
-/// A `PagedArray` of `T`s, as `create!T` returns it: `arr[i]` is element `i` by `ref`, and every function taking a `PagedArray` accepts it.
+/// A `PagedArray` of `T`s, as `create!T` returns it: `array[i]` is element `i` by `ref`, and every function taking a `PagedArray` accepts it.
 ///
 /// Examples:
 /// ---
-/// PagedArrayOf!int arr = create!int();
-/// scope(exit) free(arr);
-/// assert(pushBack(arr, 7));
-/// arr[0] = 8;
-/// assert(arr[0] == 8 && length(arr) == 1);
+/// PagedArrayOf!int array = create!int();
+/// scope(exit) free(array);
+/// assert(pushBack(array, 7));
+/// array[0] = 8;
+/// assert(array[0] == 8 && length(array) == 1);
 /// ---
 struct PagedArrayOf(T) {
 	PagedArray base; /// The type-erased array this views.
@@ -145,10 +144,10 @@ struct PagedArrayOf(T) {
 	///
 	/// Examples:
 	/// ---
-	/// PagedArrayOf!int arr = create!int();
-	/// scope(exit) free(arr);
-	/// assert(pushBack(arr, 7));
-	/// int* p = &arr[0];
+	/// PagedArrayOf!int array = create!int();
+	/// scope(exit) free(array);
+	/// assert(pushBack(array, 7));
+	/// int* p = &array[0];
 	/// assert(*p == 7);
 	/// ---
 	ref T opIndex(size_t i) @trusted {
@@ -189,7 +188,7 @@ PagedArray create(size_t elementSize, size_t pageBytes = defaultPageBytes) {
 PagedArrayOf!T create(T)(size_t pageBytes = defaultPageBytes) {
 	mixin fp.pointer.requireAlignable!T;
 	PagedArray self = create(T.sizeof, pageBytes);
-	self.finalizeFunction = fp.lifecycle.finalizeFunction!T();
+	self.finalizer = fp.lifecycle.finalizerOf!T();
 	return PagedArrayOf!T(self);
 }
 
@@ -197,15 +196,15 @@ PagedArrayOf!T create(T)(size_t pageBytes = defaultPageBytes) {
 ///
 /// Examples:
 /// ---
-/// PagedArrayOf!int arr = create!int();
-/// assert(pushBack(arr, 1));
-/// free(arr);
-/// assert(length(arr) == 0 && capacity(arr) == 0);
+/// PagedArrayOf!int array = create!int();
+/// assert(pushBack(array, 1));
+/// free(array);
+/// assert(length(array) == 0 && capacity(array) == 0);
 /// ---
 void free(ref PagedArray self) @trusted {
 	endLifetimes(self, 0, self.count);
 	foreach (i; 0 .. fp.dynarray.length(self.pages))
-		cast(void)fp.pointer.allocFunction(self.pages[i], 0);
+		cast(void)fp.pointer.allocator(self.pages[i], 0);
 	fp.dynarray.free(self.pages);
 	self.count = 0;
 }
@@ -215,10 +214,10 @@ void free(ref PagedArray self) @trusted {
 ///
 /// Examples:
 /// ---
-/// PagedArrayOf!int arr = create!int(16);
-/// scope(exit) free(arr);
-/// assert(reserve(arr, 10));
-/// assert(capacity(arr) == 12 && length(arr) == 0);
+/// PagedArrayOf!int array = create!int(16);
+/// scope(exit) free(array);
+/// assert(reserve(array, 10));
+/// assert(capacity(array) == 12 && length(array) == 0);
 /// ---
 bool reserve(ref PagedArray self, size_t n) @trusted {
 	immutable pageBytes = pageElements(self) * self.elementSize;
@@ -226,7 +225,7 @@ bool reserve(ref PagedArray self, size_t n) @trusted {
 	if (pagesNeeded > fp.dynarray.capacity(self.pages) && fp.dynarray.maybeGrow(self.pages, pagesNeeded, false, false) is null)
 		return false;
 	while (capacity(self) < n) {
-		ubyte* page = cast(ubyte*) fp.pointer.allocFunction(null, pageBytes);
+		ubyte* page = cast(ubyte*) fp.pointer.allocator(null, pageBytes);
 		if (page is null) return false;
 		cast(void)fp.dynarray.pushBack(self.pages, page); // the table already has room
 	}
@@ -237,12 +236,12 @@ bool reserve(ref PagedArray self, size_t n) @trusted {
 ///
 /// Examples:
 /// ---
-/// PagedArrayOf!int arr = create!int();
-/// scope(exit) free(arr);
-/// int* first = grow!int(arr, 3);
+/// PagedArrayOf!int array = create!int();
+/// scope(exit) free(array);
+/// int* first = grow!int(array, 3);
 /// first[0] = 1;
-/// assert(length(arr) == 3 && arr[0] == 1);
-/// assert(grow(arr) is &arr[3]);
+/// assert(length(array) == 3 && array[0] == 1);
+/// assert(grow(array) is &array[3]);
 /// ---
 void* grow(ref PagedArray self, size_t count = 1) {
 	assert(count > 0);
@@ -254,9 +253,9 @@ void* grow(ref PagedArray self, size_t count = 1) {
 		if (overflow || !reserve(self, newCount)) return null;
 	}
 	self.count += count;
-	if (self.finalizeFunction !is null) // these slots are now live, so they must read as empty rather than as the page's stale bytes
+	if (self.finalizer !is null) // these slots are now live, so they must read as empty rather than as the page's stale bytes
 		for (size_t i = self.count - count; i < self.count; ++i)
-			memset(cast(ubyte*) get(self, i), 0, self.elementSize);
+			core.stdc.string.memset(cast(ubyte*) get(self, i), 0, self.elementSize);
 	return get(self, self.count - count);
 }
 /// Ditto, with `T.sizeof` required to equal the array's element size.
@@ -266,7 +265,7 @@ T* grow(T)(ref PagedArray self, size_t count = 1) @trusted {
 	if (slot is null) return null; // the array is unchanged, so the loop below would otherwise wipe live elements
 	static if (!fp.lifecycle.isBitMoveable!T) // the new elements are not contiguous, so they cannot be zeroed in one pass
 		for (size_t i = self.count - count; i < self.count; ++i)
-			fp.lifecycle.initSlots(cast(T*) get(self, i), 1);
+			fp.lifecycle.emptySlots(cast(T*) get(self, i), 1);
 	return cast(T*) slot;
 }
 
@@ -274,58 +273,48 @@ T* grow(T)(ref PagedArray self, size_t count = 1) @trusted {
 ///
 /// Examples:
 /// ---
-/// PagedArrayOf!double arr = create!double();
-/// scope(exit) free(arr);
-/// assert(pushBack(arr, 1.5));
-/// assert(arr[0] == 1.5);
+/// PagedArrayOf!double array = create!double();
+/// scope(exit) free(array);
+/// assert(pushBack(array, 1.5));
+/// assert(array[0] == 1.5);
 /// ---
 bool pushBack(T)(ref PagedArray self, T value) @trusted {
 	assert(T.sizeof == self.elementSize);
 	void* slot = grow(self, 1);
 	if (slot is null) { fp.lifecycle.endLifetime(value); return false; }
-	fp.lifecycle.initSlots(cast(T*) slot, 1);
+	fp.lifecycle.emptySlots(cast(T*) slot, 1);
 	fp.lifecycle.moveInto(*cast(T*) slot, value);
 	return true;
 }
 
 
-/// Ends the last `count` elements' lifetimes, `count` no greater than the length; their pages are kept for reuse (`shrinkToFit` releases them).
+/// Ends the last `count` elements' lifetimes, one by default, `count` no greater than the length; their pages are kept for reuse (`shrinkToFit` releases them).
 ///
 /// Examples:
 /// ---
-/// PagedArrayOf!int arr = create!int();
-/// scope(exit) free(arr);
-/// assert(grow(arr, 5) !is null);
-/// popBackCount(arr, 3);
-/// assert(length(arr) == 2);
+/// PagedArrayOf!int array = create!int();
+/// scope(exit) free(array);
+/// assert(grow(array, 5) !is null);
+/// removeLast(array, 3);
+/// assert(length(array) == 2);
+/// removeLast(array);
+/// assert(length(array) == 1);
 /// ---
-void popBackCount(ref PagedArray self, size_t count) {
+void removeLast(ref PagedArray self, size_t count = 1) {
 	assert(count <= self.count);
 	endLifetimes(self, self.count - count, self.count);
 	self.count -= count;
 }
 
-/// Ends the last element's lifetime; its page is kept for reuse.
-///
-/// Examples:
-/// ---
-/// PagedArrayOf!int arr = create!int();
-/// scope(exit) free(arr);
-/// assert(pushBack(arr, 1));
-/// popBack(arr);
-/// assert(empty(arr));
-/// ---
-void popBack(ref PagedArray self) { popBackCount(self, 1); }
-
 /// Sets the length to 0 without releasing any page (see `shrinkToFit`), ending the elements' lifetimes.
 ///
 /// Examples:
 /// ---
-/// PagedArrayOf!int arr = create!int(16);
-/// scope(exit) free(arr);
-/// assert(grow(arr, 5) !is null);
-/// clear(arr);
-/// assert(empty(arr) && capacity(arr) == 8);
+/// PagedArrayOf!int array = create!int(16);
+/// scope(exit) free(array);
+/// assert(grow(array, 5) !is null);
+/// clear(array);
+/// assert(empty(array) && capacity(array) == 8);
 /// ---
 void clear(ref PagedArray self) {
 	endLifetimes(self, 0, self.count);
@@ -336,23 +325,23 @@ void clear(ref PagedArray self) {
 ///
 /// Examples:
 /// ---
-/// PagedArrayOf!int arr = create!int(16);
-/// scope(exit) free(arr);
-/// assert(grow(arr, 12) !is null);
-/// popBackCount(arr, 10);
-/// shrinkToFit(arr);
-/// assert(capacity(arr) == 4 && length(arr) == 2);
+/// PagedArrayOf!int array = create!int(16);
+/// scope(exit) free(array);
+/// assert(grow(array, 12) !is null);
+/// removeLast(array, 10);
+/// shrinkToFit(array);
+/// assert(capacity(array) == 4 && length(array) == 2);
 /// ---
 void shrinkToFit(ref PagedArray self) @trusted {
 	immutable needed = (self.count + pageElements(self) - 1) >> self.pageShift;
 	immutable have = fp.dynarray.length(self.pages);
 	foreach (i; needed .. have)
-		cast(void)fp.pointer.allocFunction(self.pages[i], 0);
+		cast(void)fp.pointer.allocator(self.pages[i], 0);
 	if (needed == 0) {
 		fp.dynarray.free(self.pages);
 		return;
 	}
-	fp.dynarray.popBackCount(self.pages, have - needed);
+	fp.dynarray.removeLast(self.pages, have - needed);
 	if (fp.dynarray.capacity(self.pages) > needed)
 		cast(void)fp.dynarray.shrinkToFit(self.pages);
 }
@@ -362,11 +351,11 @@ void shrinkToFit(ref PagedArray self) @trusted {
 ///
 /// Examples:
 /// ---
-/// PagedArrayOf!int arr = create!int();
-/// scope(exit) free(arr);
-/// assert(pushBack(arr, 1) && pushBack(arr, 2));
-/// swap(arr, 0, 1);
-/// assert(arr[0] == 2 && arr[1] == 1);
+/// PagedArrayOf!int array = create!int();
+/// scope(exit) free(array);
+/// assert(pushBack(array, 1) && pushBack(array, 2));
+/// swap(array, 0, 1);
+/// assert(array[0] == 2 && array[1] == 1);
 /// ---
 void swap(ref PagedArray self, size_t a, size_t b) @trusted {
 	if (a == b) return;
@@ -415,67 +404,67 @@ unittest {
 }
 
 unittest {
-	auto arr = create!int(16); // 4 ints per page
-	scope(exit) free(arr);
-	assert(empty(arr));
-	assert(capacity(arr) == 0);
+	auto array = create!int(16); // 4 ints per page
+	scope(exit) free(array);
+	assert(empty(array));
+	assert(capacity(array) == 0);
 
 	foreach (i; 0 .. 10)
-		assert(pushBack(arr, cast(int) i));
-	assert(length(arr) == 10);
-	assert(capacity(arr) == 12);
+		assert(pushBack(array, cast(int) i));
+	assert(length(array) == 10);
+	assert(capacity(array) == 12);
 	foreach (i; 0 .. 10)
-		assert(arr[i] == i);
+		assert(array[i] == i);
 
-	const(PagedArrayOf!int)* constArr = &arr;
-	assert((*constArr)[9] == 9);
-	assert(*cast(const(int)*) get(*constArr, 3) == 3);
+	const(PagedArrayOf!int)* constArray = &array;
+	assert((*constArray)[9] == 9);
+	assert(*cast(const(int)*) get(*constArray, 3) == 3);
 
-	int* first = &arr[0];
-	int* ninth = &arr[8];
-	int* slots = grow!int(arr, 3);
-	assert(slots is &arr[10]);
-	assert(capacity(arr) == 16);
+	int* first = &array[0];
+	int* ninth = &array[8];
+	int* slots = grow!int(array, 3);
+	assert(slots is &array[10]);
+	assert(capacity(array) == 16);
 	slots[0] = 100;
-	assert(arr[10] == 100);
-	assert(cast(int*) grow(arr, 7) is &arr[13]);
-	assert(length(arr) == 20);
-	assert(&arr[0] is first);
+	assert(array[10] == 100);
+	assert(cast(int*) grow(array, 7) is &array[13]);
+	assert(length(array) == 20);
+	assert(&array[0] is first);
 
-	shrinkToFit(arr);
-	assert(capacity(arr) == 20);
-	popBack(arr);
-	assert(length(arr) == 19);
-	popBackCount(arr, 10);
-	assert(length(arr) == 9);
-	shrinkToFit(arr);
-	assert(capacity(arr) == 12);
-	assert(fp.dynarray.capacity(arr.pages) == 3);
-	assert(&arr[0] is first && &arr[8] is ninth);
+	shrinkToFit(array);
+	assert(capacity(array) == 20);
+	removeLast(array);
+	assert(length(array) == 19);
+	removeLast(array, 10);
+	assert(length(array) == 9);
+	shrinkToFit(array);
+	assert(capacity(array) == 12);
+	assert(fp.dynarray.capacity(array.pages) == 3);
+	assert(&array[0] is first && &array[8] is ninth);
 	foreach (i; 0 .. 9)
-		assert(arr[i] == i);
+		assert(array[i] == i);
 
-	clear(arr);
-	assert(length(arr) == 0);
-	assert(capacity(arr) == 12);
-	assert(grow(arr, 12) !is null);
-	assert(capacity(arr) == 12);
+	clear(array);
+	assert(length(array) == 0);
+	assert(capacity(array) == 12);
+	assert(grow(array, 12) !is null);
+	assert(capacity(array) == 12);
 
-	clear(arr);
-	shrinkToFit(arr);
-	assert(capacity(arr) == 0);
-	assert(arr.pages is null);
-	shrinkToFit(arr);
+	clear(array);
+	shrinkToFit(array);
+	assert(capacity(array) == 0);
+	assert(array.pages is null);
+	shrinkToFit(array);
 
-	assert(pushBack(arr, 5));
-	assert(arr[0] == 5 && capacity(arr) == 4);
-	first = &arr[0];
+	assert(pushBack(array, 5));
+	assert(array[0] == 5 && capacity(array) == 4);
+	first = &array[0];
 	foreach (i; 0 .. 1000)
-		assert(pushBack(arr, cast(int) i));
-	assert(&arr[0] is first);
+		assert(pushBack(array, cast(int) i));
+	assert(&array[0] is first);
 	assert(*first == 5);
 	foreach (i; 0 .. 1000)
-		assert(arr[i + 1] == i);
+		assert(array[i + 1] == i);
 
 	// Larger than the scratch buffer, so the swap takes several passes.
 	struct Big { ubyte[3 * swapScratchBytes + 8] data; }
@@ -496,85 +485,85 @@ unittest {
 }
 
 unittest {
-	auto arr = create!int(16);
-	scope(exit) free(arr);
-	assert(pushBack(arr, 7));
+	auto array = create!int(16);
+	scope(exit) free(array);
+	assert(pushBack(array, 7));
 
-	assert(grow(arr, size_t.max) is null);
-	assert(length(arr) == 1);
+	assert(grow(array, size_t.max) is null);
+	assert(length(array) == 1);
 
-	auto previous = fp.testing.beginRationedAllocator();
-	assert(grow(arr, 100) is null);
-	assert(length(arr) == 1);
-	assert(grow!int(arr, 2) is &arr[1]); // the rest of the first page needs no allocation
-	assert(grow(arr, 2) is null);
-	fp.testing.endRationedAllocator(previous);
-	assert(length(arr) == 3 && capacity(arr) == 4 && arr[0] == 7);
+	auto previous = fp.testing.limitAllocations();
+	assert(grow(array, 100) is null);
+	assert(length(array) == 1);
+	assert(grow!int(array, 2) is &array[1]); // the rest of the first page needs no allocation
+	assert(grow(array, 2) is null);
+	fp.testing.restoreAllocator(previous);
+	assert(length(array) == 3 && capacity(array) == 4 && array[0] == 7);
 
 	// Fill every page and the page table's spare slots, so the next element needs a new page and a bigger table.
-	while (fp.dynarray.length(arr.pages) < fp.dynarray.capacity(arr.pages))
-		assert(grow(arr, pageElements(arr)) !is null);
-	if (length(arr) < capacity(arr))
-		assert(grow(arr, capacity(arr) - length(arr)) !is null);
-	immutable filled = length(arr);
-	immutable pagesBefore = fp.dynarray.length(arr.pages);
-	previous = fp.testing.beginRationedAllocator();
-	assert(!pushBack(arr, 8)); // refused at the table, before any page is allocated
-	fp.testing.endRationedAllocator(previous);
-	assert(length(arr) == filled);
-	assert(fp.dynarray.length(arr.pages) == pagesBefore);
+	while (fp.dynarray.length(array.pages) < fp.dynarray.capacity(array.pages))
+		assert(grow(array, pageElements(array)) !is null);
+	if (length(array) < capacity(array))
+		assert(grow(array, capacity(array) - length(array)) !is null);
+	immutable filled = length(array);
+	immutable pagesBefore = fp.dynarray.length(array.pages);
+	previous = fp.testing.limitAllocations();
+	assert(!pushBack(array, 8)); // refused at the table, before any page is allocated
+	fp.testing.restoreAllocator(previous);
+	assert(length(array) == filled);
+	assert(fp.dynarray.length(array.pages) == pagesBefore);
 
 	// The table is sized first, so an impossible reservation fails at once instead of allocating pages until memory runs out.
-	assert(!reserve(arr, size_t.max));
-	assert(fp.dynarray.length(arr.pages) == pagesBefore);
+	assert(!reserve(array, size_t.max));
+	assert(fp.dynarray.length(array.pages) == pagesBefore);
 
-	popBackCount(arr, filled - 2);
-	immutable tableCapacity = fp.dynarray.capacity(arr.pages);
-	previous = fp.testing.beginRationedAllocator();
-	shrinkToFit(arr);
-	fp.testing.endRationedAllocator(previous);
-	assert(capacity(arr) == 4);
-	assert(fp.dynarray.capacity(arr.pages) == tableCapacity);
-	assert(length(arr) == 2 && arr[0] == 7);
+	removeLast(array, filled - 2);
+	immutable tableCapacity = fp.dynarray.capacity(array.pages);
+	previous = fp.testing.limitAllocations();
+	shrinkToFit(array);
+	fp.testing.restoreAllocator(previous);
+	assert(capacity(array) == 4);
+	assert(fp.dynarray.capacity(array.pages) == tableCapacity);
+	assert(length(array) == 2 && array[0] == 7);
 }
 
 unittest {
 	static struct Handle {
 		int* data;
 		void finalize() @nogc nothrow { if (data !is null) ++finalizeCount; data = null; }
-		void moveTo(ref Handle dest) @nogc nothrow { dest.data = data; data = null; }
+		void moveTo(ref Handle destination) @nogc nothrow { destination.data = data; data = null; }
 	}
 
 	static assert(!fp.lifecycle.isBitMoveable!Handle);
 
-	PagedArrayOf!Handle arr = create!Handle(2 * Handle.sizeof); // two elements per page
-	scope(exit) free(arr);
+	PagedArrayOf!Handle array = create!Handle(2 * Handle.sizeof); // two elements per page
+	scope(exit) free(array);
 	finalizeCount = 0;
 
-	assert(pushBack(arr, Handle(cast(int*) 1)) && pushBack(arr, Handle(cast(int*) 2)));
-	assert(length(arr) == 2 && arr[1].data == cast(int*) 2 && finalizeCount == 0);
+	assert(pushBack(array, Handle(cast(int*) 1)) && pushBack(array, Handle(cast(int*) 2)));
+	assert(length(array) == 2 && array[1].data == cast(int*) 2 && finalizeCount == 0);
 
-	popBackCount(arr, 1);
+	removeLast(array, 1);
 	assert(finalizeCount == 1); // the popped slot is empty, and past the length to read
 
-	assert(pushBack(arr, Handle(cast(int*) 3)));
-	swap(arr, 0, 1);
-	assert(arr[0].data == cast(int*) 3 && arr[1].data == cast(int*) 1);
+	assert(pushBack(array, Handle(cast(int*) 3)));
+	swap(array, 0, 1);
+	assert(array[0].data == cast(int*) 3 && array[1].data == cast(int*) 1);
 
-	clear(arr);
-	assert(finalizeCount == 3 && empty(arr));
+	clear(array);
+	assert(finalizeCount == 3 && empty(array));
 
 	// The cleared slots are empty, so growing into them and freeing ends nothing.
-	assert(grow!Handle(arr, 3) !is null);
-	assert(arr[0].data is null && arr[2].data is null);
-	free(arr);
+	assert(grow!Handle(array, 3) !is null);
+	assert(array[0].data is null && array[2].data is null);
+	free(array);
 	assert(finalizeCount == 3);
 
 	// A refused grow leaves the array alone, rather than emptying the slots the count it did not reach would have covered.
-	auto rationed = fp.testing.beginRationedAllocator(0);
-	assert(grow!Handle(arr, 3) is null && empty(arr));
-	fp.testing.endRationedAllocator(rationed);
-	assert(pushBack(arr, Handle(cast(int*) 4)) && arr[0].data == cast(int*) 4);
+	auto rationed = fp.testing.limitAllocations(0);
+	assert(grow!Handle(array, 3) is null && empty(array));
+	fp.testing.restoreAllocator(rationed);
+	assert(pushBack(array, Handle(cast(int*) 4)) && array[0].data == cast(int*) 4);
 
 	// Untyped `grow` on an array that knows lifetimes starts its new slots empty, so freeing cannot end a lifetime that never began.
 	finalizeCount = 0;
@@ -590,9 +579,9 @@ unittest {
 	finalizeCount = 0;
 	PagedArrayOf!Handle tight = create!Handle(2 * Handle.sizeof);
 	assert(pushBack(tight, Handle(cast(int*) 5)) && pushBack(tight, Handle(cast(int*) 6)));
-	rationed = fp.testing.beginRationedAllocator(0);
+	rationed = fp.testing.limitAllocations(0);
 	assert(!pushBack(tight, Handle(cast(int*) 7)) && finalizeCount == 1);
-	fp.testing.endRationedAllocator(rationed);
+	fp.testing.restoreAllocator(rationed);
 	free(tight);
 	assert(finalizeCount == 3);
 }
