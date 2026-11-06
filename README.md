@@ -6,18 +6,18 @@ Ported from an earlier C/C++ implementation (parallel C-macro and C++ template A
 
 ## Modules
 
-- `fp.pointer` — the fat pointer core: `malloc`/`realloc`/`free`, stack allocation (`Array!(T, N)`), `valid`/`length`/`stackAllocated`/etc.
+- `fp.pointer` — the fat pointer core: `allocate`/`resize`/`free`, stack allocation (`Array!(T, N)`, `allocateOnStack`), `valid`/`length`/`onStack`/etc., and `copy`, a slice copy that needs no druntime.
   Non-owning views are just native D slices (`pointer.slice(p)` or `p[a .. b]`) rather than a separate view type.
-- `fp.lifecycle` — how containers copy, move and end their elements: `isBitMoveable`, `moveInto`, `copyInto`, `swapInto`, `endLifetime`, and the `Owned` wrapper for a container that should free its fat pointer elements.
-- `fp.dynarray` — growable arrays on top of `fp.pointer` (`reserve`, `pushBack`, `pushFront`, `insert`, `removeAt`, `clone`, ...).
+- `fp.lifecycle` — how containers copy, move and end their elements: `isBitMoveable`, `moveInto`, `copyInto`, `swapInto`, `endLifetime`, composed field by field for a struct without hooks of its own; the `Owned` wrapper for a container that should free its fat pointer elements; and `equal`/`contentHash`, which use a type's own hooks or else its fields' bytes, padding ignored.
+- `fp.dynarray` — growable arrays on top of `fp.pointer` (`reserve`, `reserveAtLeast`, `pushBack`, `pushFront`, `insert`, `removeAt`, `removeRange`, `swapRemove`, `retain`, `unique`, `clone`, ...).
 - `fp.pagedarray` — a growable array of fixed-size pages whose elements never move, for pointers that must survive further appends.
   A plain struct with a runtime element size rather than a fat pointer.
-- `fp.hash` — `murmur`, MurmurHash3 and the hash table's default; `fnv1a`; and `mix`, for chaining a hash over several values.
+- `fp.algorithms` — hashing (`hashBytes`, MurmurHash3 and the hash table's default; `hashBytesFast`, FNV-1a; `combine`, for chaining a hash over several values), sorting and searching (`lowerBound`, `sortUnique`, an LSD `radixSort` for integer keys, `applyPermutation` through a caller's swap), and `commonSubsequence`, Myers' O(ND) diff in linear space with an edit budget.
 - `fp.hashtable` — a hopscotch-hashing open-addressing hash table on top of `fp.dynarray`.
-- `fp.string` — null-terminated dynamic strings on top of `fp.dynarray`, with UTF-8 ⇄ UTF-32 conversion and UTF-16 lengths.
-- `fp.file` — whole files: reading one into an `fp.string`, writing or appending to one, and mapping one into memory, read-only or writable; on WASI, which has no real mapping, a mapped file is read into memory instead.
-- `fp.rope` — text as a persistent rope: immutable versions sharing the leaves an edit leaves alone, with edits and line lookups in O(log n).
-- `fp.testing` — helpers for tests of code built on libfp, such as an allocator that refuses after a given number of allocations.
+- `fp.string` — null-terminated dynamic strings on top of `fp.dynarray`: `append` of any mix of strings, characters and numbers, number formatting and parsing (`appendUnsigned`, `appendHex`, `appendFloat`, `parseUnsigned`, `parseFloat`), UTF-8 ⇄ UTF-32 conversion, UTF-16 lengths, and Unicode range tables.
+- `fp.file` — whole files: reading one into an `fp.string`, writing or appending to one (`writeFile`, with a `WriteMode`), and mapping one into memory, read-only or writable (`map`, `mapForWriting`); on WASI, which has no real mapping, a mapped file is read into memory instead.
+- `fp.rope` — text as a persistent rope: immutable versions sharing the leaves an edit leaves alone, with edits and line lookups in O(log n); a container of ropes shares and frees them itself.
+- `fp.testing` — helpers for tests of code built on libfp: `runTests`, the unittest runner every library in the stack uses under `-betterC`, and `limitAllocations`, an allocator that refuses after a given number of allocations.
 
 ## Imports
 
@@ -27,7 +27,7 @@ Ported from an earlier C/C++ implementation (parallel C-macro and C++ template A
 ## Building
 
 Requires [dub](https://dub.pm) and LDC.
-DMD is refused at compile time by a `static assert` in `fp.pointer`, which covers everything built on libfp too: the stack it serves (Mizu, and the DOIR compiler on top of it) is LDC-only, and the `alloca` mixin needs a real `alloca()` call that DMD cannot emit under `-betterC` ([dlang/dmd#18276](https://github.com/dlang/dmd/issues/18276)).
+DMD is refused at compile time by a `static assert` in `fp.pointer`, which covers everything built on libfp too: the stack it serves (Mizu, and the DOIR compiler on top of it) is LDC-only, and the `allocateOnStack` mixin needs a real `alloca()` call that DMD cannot emit under `-betterC` ([dlang/dmd#18276](https://github.com/dlang/dmd/issues/18276)).
 `-version=FpAllowDMD` lowers the error for tools that only analyse the sources (`dmd -o-` syntax checks, ddoc) and never run what they build.
 
 ```sh
@@ -37,7 +37,7 @@ dub test --compiler=ldc2                     # build and run the unittests
 
 ## Testing
 
-`-betterC` has no unittest runner of its own, so [tests/runner.d](tests/runner.d) walks each `fp` module with `__traits(getUnitTests)` and calls the tests itself.
+`-betterC` has no unittest runner of its own, so [tests/runner.d](tests/runner.d) hands its module list to `fp.testing.runTests`, which walks each with `__traits(getUnitTests)` and calls the tests itself.
 It reports each module and test index to `stderr` as it goes — `stderr` is unbuffered, so a test that hangs or aborts still leaves a record of how far the run got — and prints the total at the end.
 
 The `unittest` configuration is the default for `dub test`, so a bare `dub test --compiler=ldc2` picks up the runner.
@@ -65,3 +65,9 @@ python3 tools/coverage.py -v     # ... and every uncovered line
 
 `-cov` records its line counts through druntime, which `-betterC` does not have, so the script builds the same sources and the same tests as ordinary D — `tests/runner.d` supplies a druntime `main` when `LibfpCoverage` is set, and disables druntime's own test pass so the tests still run exactly once.
 It asks `dub describe` where the sources and import paths are rather than repeating `dub.json`, and drops any dependency's `.lst` files from the report so the numbers cover libfp only.
+
+## Checks
+
+`python3 tools/doctest.py` compiles and runs every documentation example and reports public definitions missing documentation or an example.
+`python3 tools/lint.py` checks the layering, naming and wrapper rules of [AGENTS.md](AGENTS.md); every library built on libfp keeps a copy with its own `CONFIG`.
+Both run in CI.

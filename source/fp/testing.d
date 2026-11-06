@@ -4,9 +4,9 @@
 /// ---
 /// static import fp.dynarray;
 /// int* list = null;
-/// auto previous = beginRationedAllocator(0);
+/// auto previous = limitAllocations(0);
 /// assert(!fp.dynarray.pushBack(list, 1));
-/// endRationedAllocator(previous);
+/// restoreAllocator(previous);
 /// assert(fp.dynarray.pushBack(list, 1));
 /// fp.dynarray.free(list);
 /// ---
@@ -16,15 +16,45 @@ static import fp.dynarray;
 static import fp.pointer;
 static import fp.string;
 
+
+// --- running tests ---------------------------------------------------------------
+
+/// Runs every unittest of each module named in `modules`, in order, printing each module's name and test count and each test's index to stderr as it goes, then `<project>: all N tests passed.` to stdout. A failing test aborts through its assert. Returns how many tests ran. It is outside this module's `@nogc nothrow` label, so it runs tests with any attributes.
+///
+/// Examples:
+/// ---
+/// // tests/runner.d of a project whose modules are `app.parse` and `app.check`:
+/// // extern(C) int main() { cast(void) fp.testing.runTests!("app.parse", "app.check")("app"); return 0; }
+/// static assert(__traits(compiles, runTests!("fp.algorithms")("libfp")));
+/// ---
+size_t runTests(modules...)(const(char)[] project) {
+	static import core.stdc.stdio;
+	size_t total = 0;
+	static foreach (name; modules) {{
+		alias mod = imported!name;
+		alias tests = __traits(getUnitTests, mod);
+		cast(void) core.stdc.stdio.fprintf(core.stdc.stdio.stderr, "%s (%d tests)\n", name.ptr, cast(int) tests.length);
+		static foreach (i, test; tests) {
+			cast(void) core.stdc.stdio.fprintf(core.stdc.stdio.stderr, "  [%d] ", cast(int) i);
+			test();
+			cast(void) core.stdc.stdio.fprintf(core.stdc.stdio.stderr, "ok\n");
+			++total;
+		}
+	}}
+	cast(void) core.stdc.stdio.printf("%.*s: all %d tests passed.\n", cast(int) project.length, project.ptr, cast(int) total);
+	return total;
+}
+
+
 @nogc nothrow:
 
 
 // --- refused allocations -----------------------------------------------------
 
-private __gshared fp.pointer.AllocFunction rationedUnderlying;
+private __gshared fp.pointer.Allocator rationedUnderlying;
 private __gshared size_t rationedRemaining;
 
-private void* rationedAlloc(void* p, size_t size) {
+private void* rationedAllocator(void* p, size_t size) {
 	// Frees are always forwarded, or a test could not clean up after itself.
 	if (size == 0) return rationedUnderlying(p, 0);
 	if (rationedRemaining == 0) return null;
@@ -32,36 +62,36 @@ private void* rationedAlloc(void* p, size_t size) {
 	return rationedUnderlying(p, size);
 }
 
-/// Makes `fp.pointer.allocFunction` grant only the next `n` allocations and refuse the rest, while still freeing, and returns the allocator it replaced; pass that to `endRationedAllocator` to restore it. It is one global for every thread, so tests using it must not run concurrently with anything that allocates.
+/// Makes `fp.pointer.allocator` grant only the next `n` allocations and refuse the rest, while still freeing, and returns the allocator it replaced; pass that to `restoreAllocator` to restore it. It is one global for every thread, so tests using it must not run concurrently with anything that allocates.
 ///
 /// Examples:
 /// ---
 /// static import fp.dynarray;
-/// auto previous = beginRationedAllocator(1);
+/// auto previous = limitAllocations(1);
 /// int* granted = fp.dynarray.create!int(1);
 /// assert(granted !is null && fp.dynarray.create!int(1) is null);
 /// fp.dynarray.free(granted);
-/// endRationedAllocator(previous);
+/// restoreAllocator(previous);
 /// ---
-fp.pointer.AllocFunction beginRationedAllocator(size_t n = 0) {
-	fp.pointer.AllocFunction previous = fp.pointer.allocFunction;
+fp.pointer.Allocator limitAllocations(size_t n = 0) {
+	fp.pointer.Allocator previous = fp.pointer.allocator;
 	rationedUnderlying = previous;
 	rationedRemaining = n;
-	fp.pointer.allocFunction = &rationedAlloc;
+	fp.pointer.allocator = &rationedAllocator;
 	return previous;
 }
 
-/// Restores the allocator `beginRationedAllocator` returned.
+/// Restores the allocator `limitAllocations` returned.
 ///
 /// Examples:
 /// ---
 /// static import fp.pointer;
-/// auto previous = beginRationedAllocator();
-/// endRationedAllocator(previous);
-/// assert(fp.pointer.allocFunction is previous);
+/// auto previous = limitAllocations();
+/// restoreAllocator(previous);
+/// assert(fp.pointer.allocator is previous);
 /// ---
-void endRationedAllocator(fp.pointer.AllocFunction previous) {
-	fp.pointer.allocFunction = previous;
+void restoreAllocator(fp.pointer.Allocator previous) {
+	fp.pointer.allocator = previous;
 }
 
 
@@ -98,7 +128,7 @@ char* temporaryDirectory() @trusted {
 			const(char)[] path = variable is null || *variable == 0 ? "/tmp" : variable[0 .. core.stdc.string.strlen(variable)];
 		}
 		while (path.length > 1 && path[$ - 1] == '/') path = path[0 .. $ - 1];
-		return fp.string.makeDynamic(path);
+		return fp.string.clone(path);
 	}
 }
 
@@ -138,8 +168,9 @@ char* temporaryFile() @trusted {
 		static import core.stdc.stdio;
 		// Without mkstemp, a counter names candidates, and opening with "x" refuses one that exists.
 		foreach (attempt; 0 .. 1000) {
-			char* path = fp.string.createFromConcatenation(directory, "/fp-", temporaryFiles++);
-			if (path is null) return null;
+			auto made = fp.string.joined(directory, "/fp-", temporaryFiles++);
+			if (made.isNull) return null;
+			char* path = made.get;
 			auto f = core.stdc.stdio.fopen(path, "wbx");
 			if (f !is null) {
 				cast(void) core.stdc.stdio.fclose(f);
@@ -151,14 +182,15 @@ char* temporaryFile() @trusted {
 	} else {
 		static import core.sys.posix.stdlib;
 		static import core.sys.posix.unistd;
-		char* path = fp.string.createFromConcatenation(directory, "/fp-XXXXXX");
-		if (path is null) return null;
-		immutable fd = core.sys.posix.stdlib.mkstemp(path);
-		if (fd < 0) {
+		auto made = fp.string.joined(directory, "/fp-XXXXXX");
+		if (made.isNull) return null;
+		char* path = made.get;
+		immutable descriptor = core.sys.posix.stdlib.mkstemp(path);
+		if (descriptor < 0) {
 			fp.string.free(path);
 			return null;
 		}
-		cast(void) core.sys.posix.unistd.close(fd);
+		cast(void) core.sys.posix.unistd.close(descriptor);
 		return path;
 	}
 }
@@ -166,13 +198,13 @@ char* temporaryFile() @trusted {
 
 unittest { // a ration counts allocations, never frees, and ends with the allocator it replaced
 	static import fp.dynarray;
-	auto previous = beginRationedAllocator(2);
+	auto previous = limitAllocations(2);
 	int* a = fp.dynarray.create!int(1), b = fp.dynarray.create!int(1);
 	assert(a !is null && b !is null && fp.dynarray.create!int(1) is null);
 	fp.dynarray.free(a);
 	assert(fp.dynarray.create!int(1) is null);
-	endRationedAllocator(previous);
-	assert(fp.pointer.allocFunction is previous);
+	restoreAllocator(previous);
+	assert(fp.pointer.allocator is previous);
 	fp.dynarray.free(b);
 }
 
@@ -194,9 +226,9 @@ unittest { // temporary files are new, empty and distinct, inside a directory na
 	fp.string.free(second);
 
 	for (size_t budget = 0;; ++budget) {
-		auto previous = beginRationedAllocator(budget);
+		auto previous = limitAllocations(budget);
 		char* rationed = temporaryFile();
-		endRationedAllocator(previous);
+		restoreAllocator(previous);
 		if (rationed is null) continue;
 		assert(fp.file.removeFile(fp.string.slice(rationed)));
 		fp.string.free(rationed);
@@ -208,7 +240,7 @@ unittest { // temporary files are new, empty and distinct, inside a directory na
 		static import core.stdc.stdlib;
 		static import core.sys.posix.stdlib;
 		const(char)* saved = core.stdc.stdlib.getenv("TMPDIR");
-		char* kept = saved is null ? null : fp.string.makeDynamic(fp.string.slice(saved));
+		char* kept = saved is null ? null : fp.string.clone(fp.string.slice(saved));
 		scope(exit) fp.string.free(kept);
 		assert(saved is null || kept !is null);
 		assert(core.sys.posix.stdlib.setenv("TMPDIR", "/nonexistent-fp-directory", 1) == 0);

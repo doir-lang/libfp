@@ -1,36 +1,21 @@
 module runner;
 
-import core.stdc.stdio : fprintf, printf, stderr;
 
-private enum modules = [
+private alias modules = imported!"std.meta".AliasSeq!(
 	"fp.pointer",
 	"fp.lifecycle",
 	"fp.dynarray",
 	"fp.pagedarray",
-	"fp.hash",
+	"fp.algorithms",
 	"fp.hashtable",
 	"fp.string",
 	"fp.file",
 	"fp.rope",
 	"fp.testing",
-];
+);
 
 private int runEveryTest() {
-	size_t total = 0;
-
-	static foreach (name; modules) {{
-		alias mod = mixin("imported!\"" ~ name ~ "\"");
-		alias tests = __traits(getUnitTests, mod);
-		fprintf(stderr, "%s (%d tests)\n", name.ptr, cast(int) tests.length);
-		static foreach (i, test; tests) {
-			fprintf(stderr, "  [%d] ", cast(int) i);
-			test();
-			fprintf(stderr, "ok\n");
-			++total;
-		}
-	}}
-
-	printf("libfp: all %d tests passed.\n", cast(int) total);
+	cast(void) imported!"fp.testing".runTests!modules("libfp");
 	return 0;
 }
 

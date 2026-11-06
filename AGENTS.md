@@ -21,12 +21,12 @@
   ///
   /// Examples:
   /// ---
-  /// int* arr = null;
-  /// assert(pushBack(arr, 42));
-  /// assert(arr[0] == 42);
-  /// free(arr);
+  /// int* array = null;
+  /// assert(pushBack(array, 42));
+  /// assert(array[0] == 42);
+  /// free(array);
   /// ---
-  bool pushBack(T)(ref T* da, T value) { ... }
+  bool pushBack(T)(ref T* array, T value) { ... }
   ```
 
 - Keep examples short, and make them correct against the current API: they should compile and pass as written under `-betterC`.
@@ -35,7 +35,7 @@
 
 ## Style
 
-- Prefer plain-data structs operated on by free functions that take them by `ref` (for example `pushBack(arr, x)`, `free(arr)`), rather than methods.
+- Prefer plain-data structs operated on by free functions that take them by `ref` (for example `pushBack(array, x)`, `free(array)`), rather than methods.
   Use member functions only for operator overloads, for `@property` accessors that name part of a field (such as `ecrs.relation.Relates` naming a slot of `related`), and for what a language protocol requires to be a member, such as range primitives (`empty`, `front`, `popFront`) or an `alias this` target.
 - Prefer fully qualified names to aliasing imports: call `fp.string.free(s)` rather than `import fp.string : stringFree = free;` or `alias stringFree = fp.string.free;`.
   A `static import` keeps a module's names out of scope so every use has to be qualified.
@@ -43,8 +43,20 @@
   The exception is a `public import` that re-exports names as part of the module's own API.
 - Name everything in camelCase.
   Add a trailing underscore only when the plain name is a D keyword (`out_`, `in_`, `with_`).
+- Make names document themselves, so neither a comment nor a wrapper is needed to explain them:
+  - Spell words out: no C-heritage names or abbreviations (`allocate`, not `malloc`; `context`, not `ctx`; `array`, not `da`).
+  - Name the effect or the result, not the mechanism (`lockForReading`, not `readLock`; `wordEnd` for a function returning where a word ends).
+  - Do not repeat what the qualified module path or the types already say: calls are always qualified, so `fp.pointer.allocate` needs no `Memory`.
+  - Name a sentinel for what it means where it is used, and split a sentinel that would mean two things (`notInterned` and `refused`, not one `none`).
+  - Purpose suffixes read `ForReading`/`ForWriting` (`lockForWriting`, `getForWriting`, `mapForWriting`).
+  - Keep the words every reader already knows: `free`, `length`, `find`, `insert`, `hash`, `create`, `contains`, `pushBack`, `pushFront`, `removeAt`.
+- Avoid one-line wrappers: a function whose body only forwards to another call, fixing an argument or two or reaching into a field, adds a name to learn and hides the call it stands for.
+  Write the call out at each use, even when it is long.
+  Before keeping a wrapper, see whether renaming what it wraps would make the direct call read as well.
+  A wrapper a protocol requires (a hook found by name, an accessor of a private field) is marked `// wrapper: <reason>` on the line above its documentation comment.
 - Indent with tabs.
-- Under a `@nogc nothrow:` label, do not repeat those attributes on the declarations it already covers, including struct members and `version` blocks.
+- Under a `@nogc nothrow:` label, do not repeat those attributes on the declarations it already covers: module-level declarations, including those inside `version` blocks, and members of a template struct, whose attributes are inferred.
+  The label does not reach the members of a non-template struct, nor the hooks of a struct declared inside a function or `unittest`; those must state `@nogc nothrow` themselves, or calls from `@nogc` code fail to compile.
 
 ## Failure and invariants
 
@@ -63,6 +75,22 @@
   When functions use each other in a cycle, define first the one that more of the module uses.
 - Keep a module's unittests in the same order as the code they test.
 - Prefer merging a new test case into an existing `unittest` block covering the same section over adding a new block; add one only when no existing block fits.
+
+## Layering
+
+libfp is the bottom of a stack: bc-threads builds on it; libdiagnose, libECRS, Mizu and bc-fetch on those; DOIR on all of them.
+Every library in the stack forwards these rules.
+
+- Put code in the lowest library that has everything it needs.
+  A library above may hold only what is specific to it: threads in bc-threads, entities in libECRS, diagnostics in libdiagnose, networking in bc-fetch, the language in DOIR.
+  Before writing a helper, search the libraries below for it; if it is missing, add it there, with a test, rather than locally.
+- Only libfp, bc-threads, bc-fetch and Mizu's FFI layer (`mizu.ffi`, which loads and calls into native libraries) import `core.sys.*` or call OS APIs; everything else reaches the OS through them.
+- View a plain field atomically through `bc.platform.asShared`, never a hand-written `cast(shared …)`.
+- Hold owned memory in a struct through `fp.lifecycle.Owned` rather than hand-written `finalize` and `copyTo` hooks.
+- Compare and hash a value through `fp.lifecycle.equal` and `fp.lifecycle.contentHash`, which use its hooks if it declares them.
+  Never `memcmp` or hash a struct's raw bytes: its padding is in them.
+- Check these rules with `python3 tools/lint.py`, which every library keeps a copy of, each with its own `CONFIG` and the same `PUSHED` registry.
+  When code moves into a lower library, add the pattern it replaced to `PUSHED` in every copy, with the replacement as its hint, so the old way cannot come back.
 
 ## Bugs
 

@@ -2,7 +2,7 @@
 ///
 /// Examples:
 /// ---
-/// int* p = malloc!int(3);
+/// int* p = allocate!int(3);
 /// p[0] = 1;
 /// assert(length(p) == 3);
 /// free(p);
@@ -18,44 +18,44 @@ version(DigitalMars) {
 	version(FpAllowDMD) {} else
 		static assert(0,
 			"libfp: DMD is not supported. The stack built on libfp (Mizu, and the "
-			~ "DOIR compiler on top of it) builds only with LDC, and `alloca` needs "
+			~ "DOIR compiler on top of it) builds only with LDC, and `allocateOnStack` needs "
 			~ "a real alloca call, which DMD cannot emit under -betterC "
 			~ "(dlang/dmd#18276). Build with LDC (--compiler=ldc2). To analyse "
 			~ "these sources with DMD without running them, set -version=FpAllowDMD.");
 }
 
 
-/// Signature of the function that allocates, reallocates and frees the raw memory behind every libfp container. Its semantics mirror `realloc`:
+/// Signature of the function that allocates, reallocates and frees the raw memory behind every libfp container. Its semantics mirror C's `realloc`:
 /// $(UL
 ///   $(LI `p is null && size > 0`: allocate new memory.)
 ///   $(LI `p !is null && size > 0`: reallocate, preserving existing data.)
 ///   $(LI `size == 0`: free `p` (if non-null) and return `null`.)
 /// )
 ///
-/// The memory it returns must be aligned to `maxAlignment`, as `malloc`'s is.
-alias AllocFunction = void* function(void* p, size_t size) @nogc nothrow;
+/// The memory it returns must be aligned to `maxAlignment`, as C's `malloc`'s is.
+alias Allocator = void* function(void* p, size_t size) @nogc nothrow;
 
 /// The allocator every libfp container uses. Reassign it to plug in your own, and restore the previous one when done.
 ///
 /// Examples:
 /// ---
 /// static size_t calls;
-/// static AllocFunction underlying;
+/// static Allocator underlying;
 /// static void* counting(void* p, size_t size) @nogc nothrow {
 /// 	++calls;
 /// 	return underlying(p, size);
 /// }
-/// underlying = allocFunction;
-/// allocFunction = &counting;
-/// scope(exit) allocFunction = underlying;
+/// underlying = allocator;
+/// allocator = &counting;
+/// scope(exit) allocator = underlying;
 ///
-/// int* p = malloc!int(1);
+/// int* p = allocate!int(1);
 /// free(p);
 /// assert(calls == 2);
 /// ---
-AllocFunction allocFunction = &defaultAllocFunction;
+Allocator allocator = &defaultAllocator;
 
-private void* defaultAllocFunction(void* p, size_t size) @nogc nothrow {
+private void* defaultAllocator(void* p, size_t size) @nogc nothrow {
 	if (size == 0) {
 		if (p !is null) core.stdc.stdlib.free(p);
 		return null;
@@ -73,8 +73,8 @@ private enum ushort validityTag = 0xFE00;
 /// How a fat pointer's memory was allocated, as recorded in its `Header`. Every tag shares the high byte `validityTag`, so `valid` can reject memory that was never a fat pointer.
 enum PointerType : ushort {
 	none = 0, /// Not a fat pointer (or null).
-	heap = validityTag | 0xFE, /// From `malloc` or `realloc`.
-	stack = validityTag | 0xFF, /// From `Array` or `alloca`.
+	heap = validityTag | 0xFE, /// From `allocate` or `resize`.
+	stack = validityTag | 0xFF, /// From `Array` or `allocateOnStack`.
 	dynarray = validityTag | 0xFD, /// An `fp.dynarray`.
 	hashTable = validityTag | 0xFC, /// An `fp.hashtable`.
 }
@@ -89,7 +89,7 @@ struct Header {
 ///
 /// Examples:
 /// ---
-/// int* p = malloc!int(1);
+/// int* p = allocate!int(1);
 /// scope(exit) free(p);
 /// assert(cast(size_t) p % maxAlignment == 0);
 /// ---
@@ -104,7 +104,7 @@ enum size_t maxAlignment = 2 * size_t.sizeof;
 /// ---
 package enum size_t headerPadding(size_t bytes) = (maxAlignment - bytes % maxAlignment) % maxAlignment;
 
-/// The bytes from the start of a heap or `alloca` fat pointer's memory to its first element: the `Header`, after the padding that aligns the elements.
+/// The bytes from the start of a heap or `allocateOnStack` fat pointer's memory to its first element: the `Header`, after the padding that aligns the elements.
 ///
 /// Examples:
 /// ---
@@ -125,7 +125,7 @@ enum size_t allocationRefused = notFound - 1;
 ///
 /// Examples:
 /// ---
-/// int* p = malloc!int(2);
+/// int* p = allocate!int(2);
 /// scope(exit) free(p);
 /// assert(headerOf(p).size == 2);
 /// assert(headerOf(p).type == PointerType.heap);
@@ -155,6 +155,7 @@ version(WASI) {
 		H nullHeader;
 	}
 
+	// wrapper: the portable twin of the wasm version above
 	private H* nullHeaderOf(H)() @trusted {
 		return &nullHeader!H;
 	}
@@ -180,7 +181,7 @@ package H* containerHeaderOf(H)(inout void* p) @trusted {
 ///
 /// Examples:
 /// ---
-/// int* p = malloc!int(1);
+/// int* p = allocate!int(1);
 /// scope(exit) free(p);
 /// assert(valid(p));
 /// assert(!valid(cast(int*) null));
@@ -188,13 +189,13 @@ package H* containerHeaderOf(H)(inout void* p) @trusted {
 pragma(inline, true)
 bool valid(inout void* p) @trusted {
 	if (p is null) return false;
-	inout(Header)* h = headerOf(p);
-	if ((cast(ushort) h.type & validityMask) != validityTag) return false;
-	if (h.size > 0) return true;
+	inout(Header)* header = headerOf(p);
+	if ((cast(ushort) header.type & validityMask) != validityTag) return false;
+	if (header.size > 0) return true;
 
 	// Only dynarray and hash table headers have a `capacity` field in front of this one; reading it for any other kind overruns the allocation.
-	if (h.type != PointerType.dynarray && h.type != PointerType.hashTable) return false;
-	immutable capacity = *cast(const(size_t)*)(cast(const(ubyte)*) h - size_t.sizeof);
+	if (header.type != PointerType.dynarray && header.type != PointerType.hashTable) return false;
+	immutable capacity = *cast(const(size_t)*)(cast(const(ubyte)*) header - size_t.sizeof);
 	return capacity > 0;
 }
 
@@ -202,8 +203,8 @@ bool valid(inout void* p) @trusted {
 ///
 /// Examples:
 /// ---
-/// Array!(int, 1) arr;
-/// assert(pointerType(arr) == PointerType.stack);
+/// Array!(int, 1) array;
+/// assert(pointerType(array) == PointerType.stack);
 /// assert(pointerType(cast(int*) null) == PointerType.none);
 /// ---
 PointerType pointerType(inout void* p) {
@@ -211,26 +212,26 @@ PointerType pointerType(inout void* p) {
 	return headerOf(p).type;
 }
 
-/// Whether `p` lives on the stack (`Array` or `alloca`).
+/// Whether `p` lives on the stack (`Array` or `allocateOnStack`).
 ///
 /// Examples:
 /// ---
-/// Array!(int, 1) arr;
-/// assert(stackAllocated(arr));
+/// Array!(int, 1) array;
+/// assert(onStack(array));
 /// ---
-bool stackAllocated(inout void* p) {
+bool onStack(inout void* p) {
 	return pointerType(p) == PointerType.stack;
 }
 
-/// Whether `p` lives on the heap (`malloc`, `realloc`, or a dynarray).
+/// Whether `p` lives on the heap (`allocate`, `resize`, or a dynarray).
 ///
 /// Examples:
 /// ---
-/// int* p = malloc!int(1);
+/// int* p = allocate!int(1);
 /// scope(exit) free(p);
-/// assert(heapAllocated(p));
+/// assert(onHeap(p));
 /// ---
-bool heapAllocated(inout void* p) {
+bool onHeap(inout void* p) {
 	immutable t = pointerType(p);
 	return t == PointerType.heap || t == PointerType.dynarray;
 }
@@ -239,7 +240,7 @@ bool heapAllocated(inout void* p) {
 ///
 /// Examples:
 /// ---
-/// int* p = malloc!int(6);
+/// int* p = allocate!int(6);
 /// scope(exit) free(p);
 /// assert(length(p) == 6);
 /// assert(length(cast(int*) null) == 0);
@@ -250,15 +251,13 @@ size_t length(inout void* p) {
 	return headerOf(p).size;
 }
 
-/// Ditto
-alias size = length;
 
 /// Whether fat pointer `p` holds no elements.
 ///
 /// Examples:
 /// ---
 /// assert(empty(cast(int*) null));
-/// int* p = malloc!int(1);
+/// int* p = allocate!int(1);
 /// scope(exit) free(p);
 /// assert(!empty(p));
 /// ---
@@ -271,17 +270,17 @@ bool empty(inout void* p) {
 /// Examples:
 /// ---
 /// static struct Extended { ubyte[headerPadding!(size_t.sizeof + Header.sizeof)] padding; size_t capacity; Header base; }
-/// int* p = cast(int*) allocContainer!Extended(4 * int.sizeof, PointerType.dynarray);
+/// int* p = cast(int*) allocateContainer!Extended(4 * int.sizeof, PointerType.dynarray);
 /// assert(p !is null);
-/// scope(exit) cast(void)allocFunction(containerHeaderOf!Extended(p), 0);
+/// scope(exit) cast(void)allocator(containerHeaderOf!Extended(p), 0);
 /// assert(pointerType(p) == PointerType.dynarray && containerHeaderOf!Extended(p).capacity == 0);
 /// ---
-package void* allocContainer(H)(size_t payloadBytes, PointerType type) @trusted {
+package void* allocateContainer(H)(size_t payloadBytes, PointerType type) @trusted {
 	static assert(H.sizeof % maxAlignment == 0, "fp.pointer: " ~ H.stringof ~ " must be padded to a multiple of maxAlignment");
 	bool overflow = false;
 	immutable total = core.checkedint.addu(core.checkedint.addu(H.sizeof, payloadBytes, overflow), 1, overflow);
 	if (overflow) return null;
-	ubyte* raw = cast(ubyte*) allocFunction(null, total);
+	ubyte* raw = cast(ubyte*) allocator(null, total);
 	if (raw is null) return null;
 
 	*cast(H*) raw = H.init;
@@ -307,15 +306,15 @@ mixin template requireAlignable(T) {
 ///
 /// Examples:
 /// ---
-/// void* p = rawAlloc(null, 8);
+/// void* p = resizeHeap(null, 8);
 /// assert(headerOf(p).size == 8);
-/// assert(rawAlloc(p, 0) is null);
+/// assert(resizeHeap(p, 0) is null);
 /// ---
-package void* rawAlloc(void* p, size_t size) @trusted {
+package void* resizeHeap(void* p, size_t size) @trusted {
 	if (p is null && size == 0) return null;
 	assert(p is null || headerOf(p).type == PointerType.heap, "fp.pointer: not a heap fat pointer; free each kind through its own module");
 	if (size == 0) {
-		cast(void)allocFunction(cast(ubyte*) p - prefixBytes, 0);
+		cast(void)allocator(cast(ubyte*) p - prefixBytes, 0);
 		return null;
 	}
 
@@ -323,30 +322,30 @@ package void* rawAlloc(void* p, size_t size) @trusted {
 	bool overflow = false;
 	immutable total = core.checkedint.addu(core.checkedint.addu(prefixBytes, size, overflow), 1, overflow);
 	if (overflow) return null;
-	ubyte* raw = cast(ubyte*) allocFunction(base, total);
+	ubyte* raw = cast(ubyte*) allocator(base, total);
 	if (raw is null) return null;
 
 	ubyte* data = raw + prefixBytes;
-	Header* h = headerOf(data);
-	h.type = PointerType.heap;
-	h.size = size;
+	Header* header = headerOf(data);
+	header.type = PointerType.heap;
+	header.size = size;
 	data[size] = 0;
 	return data;
 }
 
-/// `rawAlloc` for `count` elements of `elemSize` bytes each, recording the element count rather than the byte count. Returns null if the allocator refused or the byte count would overflow, leaving `p` untouched.
+/// `resizeHeap` for `count` elements of `elementSize` bytes each, recording the element count rather than the byte count. Returns null if the allocator refused or the byte count would overflow, leaving `p` untouched.
 ///
 /// Examples:
 /// ---
-/// void* p = rawRealloc(null, int.sizeof, 4);
+/// void* p = resizeHeapArray(null, int.sizeof, 4);
 /// assert(headerOf(p).size == 4);
-/// cast(void)rawAlloc(p, 0);
+/// cast(void)resizeHeap(p, 0);
 /// ---
-package void* rawRealloc(void* p, size_t elemSize, size_t count) @trusted {
+package void* resizeHeapArray(void* p, size_t elementSize, size_t count) @trusted {
 	bool overflow = false;
-	immutable bytes = core.checkedint.mulu(elemSize, count, overflow);
+	immutable bytes = core.checkedint.mulu(elementSize, count, overflow);
 	if (overflow) return null;
-	void* data = rawAlloc(p, bytes);
+	void* data = resizeHeap(p, bytes);
 	if (data is null) return null;
 	headerOf(data).size = count;
 	return data;
@@ -357,15 +356,15 @@ package void* rawRealloc(void* p, size_t elemSize, size_t count) @trusted {
 ///
 /// Examples:
 /// ---
-/// float* p = malloc!float(4);
+/// float* p = allocate!float(4);
 /// scope(exit) free(p);
 /// assert(length(p) == 4);
-/// assert(heapAllocated(p));
+/// assert(onHeap(p));
 /// ---
-T* malloc(T)(size_t n) {
+T* allocate(T)(size_t n) {
 	mixin requireAlignable!T;
-	T* p = cast(T*) rawRealloc(null, T.sizeof, n);
-	fp.lifecycle.initSlots(p, n);
+	T* p = cast(T*) resizeHeapArray(null, T.sizeof, n);
+	fp.lifecycle.emptySlots(p, n);
 	return p;
 }
 
@@ -373,16 +372,16 @@ T* malloc(T)(size_t n) {
 ///
 /// Examples:
 /// ---
-/// int* p = malloc!int(2);
+/// int* p = allocate!int(2);
 /// p[1] = 7;
-/// int* bigger = realloc(p, 10);
+/// int* bigger = resize(p, 10);
 /// assert(bigger !is null);
 /// p = bigger;
 /// scope(exit) free(p);
 /// assert(length(p) == 10);
 /// assert(p[1] == 7);
 /// ---
-T* realloc(T)(T* p, size_t n) {
+T* resize(T)(T* p, size_t n) {
 	mixin requireAlignable!T;
 	immutable oldLength = length(p);
 	static if (!fp.lifecycle.isBitMoveable!T) {
@@ -390,21 +389,21 @@ T* realloc(T)(T* p, size_t n) {
 		if (n < oldLength) {
 			if (n == 0) {
 				fp.lifecycle.endLifetimes(p, oldLength);
-				cast(void) rawAlloc(p, 0);
+				cast(void) resizeHeap(p, 0);
 				return null;
 			}
-			T* data = cast(T*) rawAlloc(null, T.sizeof * n);
+			T* data = cast(T*) resizeHeap(null, T.sizeof * n);
 			if (data is null) return null;
-			fp.lifecycle.initSlots(data, n);
+			fp.lifecycle.emptySlots(data, n);
 			fp.lifecycle.moveRange(data, p, n);
 			fp.lifecycle.endLifetimes(p + n, oldLength - n);
-			cast(void) rawAlloc(p, 0);
+			cast(void) resizeHeap(p, 0);
 			headerOf(data).size = n;
 			return data;
 		}
 	}
-	T* data = cast(T*) rawRealloc(cast(void*) p, T.sizeof, n);
-	if (data !is null && n > oldLength) fp.lifecycle.initSlots(data + oldLength, n - oldLength);
+	T* data = cast(T*) resizeHeapArray(cast(void*) p, T.sizeof, n);
+	if (data !is null && n > oldLength) fp.lifecycle.emptySlots(data + oldLength, n - oldLength);
 	return data;
 }
 
@@ -412,20 +411,20 @@ T* realloc(T)(T* p, size_t n) {
 ///
 /// Examples:
 /// ---
-/// int* p = malloc!int(1);
+/// int* p = allocate!int(1);
 /// free(p);
 /// assert(p is null);
 /// free(p); // freeing null is a no-op
 /// ---
 void free(T)(ref T* p) {
 	fp.lifecycle.endLifetimes(p, length(p));
-	cast(void)rawAlloc(cast(void*) p, 0);
+	cast(void)resizeHeap(cast(void*) p, 0);
 	p = null;
 }
 /// Ditto
 void free(T)(const T* p) {
 	fp.lifecycle.endLifetimes(cast(T*) p, length(p));
-	cast(void)rawAlloc(cast(void*) p, 0);
+	cast(void)resizeHeap(cast(void*) p, 0);
 }
 
 
@@ -433,10 +432,10 @@ void free(T)(const T* p) {
 ///
 /// Examples:
 /// ---
-/// Array!(int, 4) arr;
-/// arr[0] = 3;
-/// assert(length(arr) == 4);
-/// assert(stackAllocated(arr));
+/// Array!(int, 4) array;
+/// array[0] = 3;
+/// assert(length(array) == 4);
+/// assert(onStack(array));
 /// ---
 struct Array(T, size_t N) {
 	private ubyte[(T.alignof - Header.sizeof % T.alignof) % T.alignof] padding;
@@ -464,26 +463,26 @@ struct Array(T, size_t N) {
 	alias ptr this;
 }
 
-/// Writes a stack header and terminator around `count` elements at `data`, returning `data`. `alloca` calls it as an initializer expression, since a mixin template's body cannot hold statements; it is public because that expression runs in the caller's scope.
+/// Writes a stack header and terminator around `count` elements at `data`, returning `data`. `allocateOnStack` calls it as an initializer expression, since a mixin template's body cannot hold statements; it is public because that expression runs in the caller's scope.
 ///
 /// Examples:
 /// ---
 /// align(maxAlignment) ubyte[prefixBytes + 3 * int.sizeof + 1] buffer;
-/// int* p = initStackHeader(cast(int*)(buffer.ptr + prefixBytes), 3);
-/// assert(length(p) == 3 && stackAllocated(p));
+/// int* p = initializeStackHeader(cast(int*)(buffer.ptr + prefixBytes), 3);
+/// assert(length(p) == 3 && onStack(p));
 /// ---
-T* initStackHeader(T)(T* data, size_t count) @trusted {
-	Header* h = headerOf(data);
-	h.type = PointerType.stack;
-	h.size = count;
+T* initializeStackHeader(T)(T* data, size_t count) @trusted {
+	Header* header = headerOf(data);
+	header.type = PointerType.stack;
+	header.size = count;
 	(cast(ubyte*) data)[T.sizeof * count] = 0;
-	fp.lifecycle.initSlots(data, count);
+	fp.lifecycle.emptySlots(data, count);
 	return data;
 }
 
-/// Declares `T* name`, a fat pointer to `countExpr` elements allocated on the stack with `alloca`, for when the size is only known at run time; prefer `Array` when it is known at compile time.
+/// Declares `T* name`, a fat pointer to `countExpr` elements allocated on the stack with C's `alloca`, for when the size is only known at run time; prefer `Array` when it is known at compile time.
 ///
-/// It is a mixin template because `alloca` must run in the stack frame that uses the memory. That memory lives until the enclosing function returns, not until the end of the block, so using it in a loop or a deeply recursive function grows the stack with every pass. Unlike `Array`, no destructor ends the elements' lifetimes, since the only thing in scope is a plain `T*`; call `fp.lifecycle.endLifetimes` before the frame goes away if `T` declares one.
+/// It is a mixin template because C's `alloca` must run in the stack frame that uses the memory. That memory lives until the enclosing function returns, not until the end of the block, so using it in a loop or a deeply recursive function grows the stack with every pass. Unlike `Array`, no destructor ends the elements' lifetimes, since the only thing in scope is a plain `T*`; call `fp.lifecycle.endLifetimes` before the frame goes away if `T` declares one.
 ///
 /// Params:
 ///   T         = element type
@@ -493,11 +492,11 @@ T* initStackHeader(T)(T* data, size_t count) @trusted {
 /// Examples:
 /// ---
 /// size_t n = 5;
-/// mixin alloca!(float, "temp", "n");
-/// foreach (ref v; slice(temp)) v = 1.5f;
-/// assert(length(temp) == 5 && temp[4] == 1.5f);
+/// mixin allocateOnStack!(float, "scratch", "n");
+/// foreach (ref v; slice(scratch)) v = 1.5f;
+/// assert(length(scratch) == 5 && scratch[4] == 1.5f);
 /// ---
-mixin template alloca(T, string name, string countExpr) {
+mixin template allocateOnStack(T, string name, string countExpr) {
 	// The body resolves names where it is mixed in, which need not have `fp` in scope.
 	static import core.stdc.stdlib;
 	static import fp.pointer;
@@ -505,30 +504,18 @@ mixin template alloca(T, string name, string countExpr) {
 	mixin(
 		"auto __" ~ name ~ "_count = cast(size_t)(" ~ countExpr ~ ");"
 		~ "ubyte* __" ~ name ~ "_raw = cast(ubyte*) core.stdc.stdlib.alloca(fp.pointer.prefixBytes + T.sizeof * __" ~ name ~ "_count + 1);"
-		~ "T* " ~ name ~ " = fp.pointer.initStackHeader(cast(T*)(__" ~ name ~ "_raw + fp.pointer.prefixBytes), __" ~ name ~ "_count);"
+		~ "T* " ~ name ~ " = fp.pointer.initializeStackHeader(cast(T*)(__" ~ name ~ "_raw + fp.pointer.prefixBytes), __" ~ name ~ "_count);"
 	);
 }
 
-
-/// A pointer to the first element of `p`.
-///
-/// Examples:
-/// ---
-/// Array!(int, 2) arr;
-/// arr[0] = 4;
-/// assert(*front(arr.ptr) == 4);
-/// ---
-inout(T)* front(T)(inout T* p) {
-	return p;
-}
 
 /// A pointer to the last element of `p` (to the first, if `p` is empty).
 ///
 /// Examples:
 /// ---
-/// Array!(int, 2) arr;
-/// arr[1] = 9;
-/// assert(*back(arr.ptr) == 9);
+/// Array!(int, 2) array;
+/// array[1] = 9;
+/// assert(*back(array.ptr) == 9);
 /// ---
 inout(T)* back(T)(inout T* p) @trusted {
 	immutable n = length(p);
@@ -539,12 +526,31 @@ inout(T)* back(T)(inout T* p) @trusted {
 ///
 /// Examples:
 /// ---
-/// Array!(int, 3) arr;
-/// foreach (i, ref v; slice(arr.ptr)) v = cast(int) i;
-/// assert(slice(arr.ptr) == [0, 1, 2]);
+/// Array!(int, 3) array;
+/// foreach (i, ref v; slice(array.ptr)) v = cast(int) i;
+/// assert(slice(array.ptr) == [0, 1, 2]);
 /// ---
 inout(T)[] slice(T)(inout T* p) {
 	return p[0 .. length(p)];
+}
+
+
+/// Copies the elements of `source` over `destination`, which must be the same length; the two may overlap. The copy is of bytes, so it suits elements whose lifetime is their bytes (`fp.lifecycle.isBitMoveable`); it stands in for slice assignment, which needs druntime under `-betterC`. It cannot fail.
+///
+/// Examples:
+/// ---
+/// char[8] buffer;
+/// copy(buffer[0 .. 3], "abc");
+/// assert(buffer[0 .. 3] == "abc");
+/// int[4] numbers = [1, 2, 3, 4];
+/// copy(numbers[1 .. 4], numbers[0 .. 3]);
+/// assert(numbers == [1, 1, 2, 3]);
+/// ---
+void copy(T)(T[] destination, const(T)[] source) @trusted {
+	static assert(fp.lifecycle.isBitMoveable!T, "fp.pointer.copy copies bytes; move " ~ T.stringof ~ " with fp.lifecycle.moveRange or copyRange");
+	assert(destination.length == source.length, "fp.pointer.copy: lengths differ");
+	static import core.stdc.string;
+	core.stdc.string.memmove(destination.ptr, source.ptr, T.sizeof * source.length);
 }
 
 
@@ -559,22 +565,22 @@ version(unittest) {
 
 
 unittest {
-	int* arr = malloc!int(20);
-	assert(arr !is null);
-	scope(exit) assert(arr is null); // Scope exits run in reverse order!
-	scope(exit) free(arr);
+	int* array = allocate!int(20);
+	assert(array !is null);
+	scope(exit) assert(array is null); // Scope exits run in reverse order!
+	scope(exit) free(array);
 
-	int* bigger = realloc!int(arr, 25);
+	int* bigger = resize!int(array, 25);
 	assert(bigger !is null);
-	arr = bigger;
-	arr[20] = 6;
+	array = bigger;
+	array[20] = 6;
 
-	assert(valid(arr));
-	assert(!stackAllocated(arr));
-	assert(heapAllocated(arr));
-	assert(length(arr) == 25);
-	assert(arr[20] == 6);
-	assert(!empty(arr));
+	assert(valid(array));
+	assert(!onStack(array));
+	assert(onHeap(array));
+	assert(length(array) == 25);
+	assert(array[20] == 6);
+	assert(!empty(array));
 
 	// Each thread queries null containers through a dummy header of its own, which no other thread writes.
 	version(Posix) {
@@ -587,48 +593,48 @@ unittest {
 		assert(theirs !is null && theirs !is containerHeaderOf!Header(null));
 	}
 
-	int[] view = slice(arr);
+	int[] view = slice(array);
 	assert(view.length == 25 && view[20] == 6);
 	int[] sub = view[20 .. 23];
 	assert(sub[0] == 6);
 	sub[1] = 8;
-	assert(arr[21] == 8);
+	assert(array[21] == 8);
 
 	// A `const(int)*` lvalue would still bind to `ref T*`, with `T` deduced as `const(int)`, so only an rvalue reaches the by-value overload.
-	int* other = malloc!int(4);
+	int* other = allocate!int(4);
 	assert(other !is null);
 	free(cast(const int*) other);
 
 	// Byte counts that wrap must be refused, not allocated small: `size_t.max / 4 + 2` ints are 4 bytes past the top.
-	assert(malloc!int(size_t.max / 4 + 2) is null);
-	assert(malloc!ubyte(size_t.max) is null);
-	assert(realloc(arr, size_t.max / 4 + 2) is null);
-	assert(length(arr) == 25 && arr[20] == 6);
+	assert(allocate!int(size_t.max / 4 + 2) is null);
+	assert(allocate!ubyte(size_t.max) is null);
+	assert(resize(array, size_t.max / 4 + 2) is null);
+	assert(length(array) == 25 && array[20] == 6);
 
-	// Elements with a lifetime: `malloc` starts them empty, `realloc` ends the slots it drops and empties the ones it adds, `free` ends the rest.
+	// Elements with a lifetime: `allocate` starts them empty, `resize` ends the slots it drops and empties the ones it adds, `free` ends the rest.
 	static assert(!fp.lifecycle.isBitMoveable!Handle);
-	Handle* owned = malloc!Handle(3);
+	Handle* owned = allocate!Handle(3);
 	assert(owned !is null && owned[2].data is null);
 	owned[0].data = cast(int*) 1;
 	owned[1].data = cast(int*) 2;
 	finalizeCount = 0;
-	Handle* shrunk = realloc!Handle(owned, 1);
+	Handle* shrunk = resize!Handle(owned, 1);
 	assert(shrunk !is null && length(shrunk) == 1 && finalizeCount == 1);
-	Handle* grown = realloc!Handle(shrunk, 3);
+	Handle* grown = resize!Handle(shrunk, 3);
 	assert(grown !is null && grown[2].data is null && finalizeCount == 1);
 	free(grown);
 	assert(grown is null && finalizeCount == 2);
 
-	Handle* cleared = malloc!Handle(2);
+	Handle* cleared = allocate!Handle(2);
 	cleared[0].data = cast(int*) 7;
 	finalizeCount = 0;
-	assert(realloc!Handle(cleared, 0) is null && finalizeCount == 1); // an `n` of 0 frees, ending every element's lifetime
+	assert(resize!Handle(cleared, 0) is null && finalizeCount == 1); // an `n` of 0 frees, ending every element's lifetime
 }
 
 unittest {
 	Array!(int, 20) fixed;
 	fixed[10] = 6;
-	assert(valid(fixed) && stackAllocated(fixed) && !heapAllocated(fixed));
+	assert(valid(fixed) && onStack(fixed) && !onHeap(fixed));
 	assert(length(fixed) == 20 && fixed[10] == 6);
 
 	// A stack array ends the lifetimes of elements whose type declares one, at the end of the block they live in.
@@ -640,36 +646,36 @@ unittest {
 	}
 	assert(finalizeCount == 1);
 
-	// Where `fp` names something else, as after `import fp.pointer : alloca;`, the mixin must still reach its own module.
+	// Where `fp` names something else, as after `import fp.pointer : allocateOnStack;`, the mixin must still reach its own module.
 	int fp = 0;
-	mixin alloca!(int, "dynamic", "20");
+	mixin allocateOnStack!(int, "dynamic", "20");
 	dynamic[10] = 6;
-	assert(valid(dynamic) && stackAllocated(dynamic) && !heapAllocated(dynamic));
+	assert(valid(dynamic) && onStack(dynamic) && !onHeap(dynamic));
 	assert(length(dynamic) == 20 && dynamic[10] == 6 && fp == 0);
 
 	// A struct, and a type the mixin site names only through a qualified import, which its `.stringof` would lose.
 	static struct Pair { int a, b; }
-	mixin alloca!(Pair, "pairs", "2");
+	mixin allocateOnStack!(Pair, "pairs", "2");
 	pairs[1] = Pair(3, 4);
 	assert(length(pairs) == 2 && pairs[1].b == 4);
 	static import core.stdc.stdio;
-	mixin alloca!(core.stdc.stdio.fpos_t, "positions", "3");
-	assert(length(positions) == 3 && stackAllocated(positions));
+	mixin allocateOnStack!(core.stdc.stdio.fpos_t, "positions", "3");
+	assert(length(positions) == 3 && onStack(positions));
 
 	// Elements as aligned as `maxAlignment` allows, wherever they live; `Array` takes any alignment.
 	static struct Wide { align(maxAlignment) ubyte b; }
 	static struct Wider { align(4 * maxAlignment) ubyte b; }
-	Wide* heap = malloc!Wide(3);
+	Wide* heap = allocate!Wide(3);
 	assert(heap !is null);
 	scope(exit) free(heap);
-	Wide* moved = realloc(heap, 300);
+	Wide* moved = resize(heap, 300);
 	assert(moved !is null);
 	heap = moved;
-	mixin alloca!(Wide, "wides", "3");
+	mixin allocateOnStack!(Wide, "wides", "3");
 	Array!(Wide, 3) wideArray;
 	Array!(Wider, 3) widerArray;
 	assert(cast(size_t) heap % Wide.alignof == 0 && cast(size_t) wides % Wide.alignof == 0);
 	assert(cast(size_t) wideArray.ptr % Wide.alignof == 0 && cast(size_t) widerArray.ptr % Wider.alignof == 0);
 	assert(length(heap) == 300 && length(wides) == 3 && length(widerArray) == 3);
-	static assert(!__traits(compiles, malloc!Wider(1)));
+	static assert(!__traits(compiles, allocate!Wider(1)));
 }

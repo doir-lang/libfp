@@ -8,7 +8,7 @@
 /// scope(exit) free(a);
 /// auto b = edit(a, 6, 7, "z").get;
 /// scope(exit) free(b);
-/// assert(equal(a, 6, "y") && equal(b, 6, "z"));
+/// assert(equalAt(a, 6, "y") && equalAt(b, 6, "z"));
 /// assert(lineOf(b, 6) == 1 && lineStart(b, 1) == 6);
 /// ---
 module fp.rope;
@@ -16,6 +16,7 @@ module fp.rope;
 static import core.stdc.string;
 static import std.typecons;
 
+static import fp.dynarray;
 static import fp.pointer;
 version(unittest) static import fp.testing;
 
@@ -40,9 +41,13 @@ private struct Node {
 private __gshared Node refusedNode;
 private __gshared Node* refused = &refusedNode;
 
-/// One version of a text: a plain value, released with `free`. Copying it does not make another owner; `share` does.
+/// One version of a text, released with `free`. Copying it does not make another owner; `share` does. A container holding ropes (`fp.lifecycle`) frees each it drops and shares each it copies.
 struct Rope {
 	private Node* root = null;
+
+	// The `fp.lifecycle` hooks, which find `free` and `share` here by name.
+	void finalize() @nogc nothrow { fp.rope.free(this); }
+	void copyTo(ref Rope destination) @nogc nothrow { fp.rope.free(destination); destination = share(this); }
 }
 
 private char* bytesOf(Node* leaf) @trusted {
@@ -60,17 +65,18 @@ private void release(Node* n) @trusted {
 	if (n is null || n is refused || --n.refs) return;
 	release(n.left);
 	release(n.right);
-	cast(void) fp.pointer.allocFunction(n, 0);
+	cast(void) fp.pointer.allocator(n, 0);
 }
 
 private Node* leaf(const(char)[] bytes) @trusted {
 	assert(bytes.length <= maxLeaf);
-	auto n = cast(Node*) fp.pointer.allocFunction(null, Node.sizeof + bytes.length);
+	auto n = cast(Node*) fp.pointer.allocator(null, Node.sizeof + bytes.length);
 	if (n is null) return refused;
 	*n = Node(null, null, bytes.length, 0, 1, 0);
 	core.stdc.string.memcpy(bytesOf(n), bytes.ptr, bytes.length);
-	for (const(char)* p = bytes.ptr, end = bytes.ptr + bytes.length; (p = cast(const(char)*) core.stdc.string.memchr(p, '\n', end - p)) !is null; ++p)
-		++n.newlines;
+	for (size_t i = 0; i < bytes.length; ++i)
+		if (bytes[i] == '\n' || (bytes[i] == '\r' && (i + 1 == bytes.length || bytes[i + 1] != '\n')))
+			++n.newlines;
 	return n;
 }
 
@@ -81,7 +87,7 @@ private Node* node(Node* l, Node* r) @trusted {
 		release(r);
 		return refused;
 	}
-	auto n = cast(Node*) fp.pointer.allocFunction(null, Node.sizeof);
+	auto n = cast(Node*) fp.pointer.allocator(null, Node.sizeof);
 	if (n is null) {
 		release(l);
 		release(r);
@@ -185,7 +191,8 @@ private Node* build(const(char)[] bytes, size_t leaves) {
 	if (leaves == 0) return null;
 	if (leaves == 1) return leaf(bytes);
 	immutable half = leaves / 2;
-	immutable cut = bytes.length * half / leaves;
+	size_t cut = bytes.length * half / leaves;
+	if (cut > 0 && cut < bytes.length && bytes[cut - 1] == '\r' && bytes[cut] == '\n') ++cut;
 	return node(build(bytes[0 .. cut], half), build(bytes[cut .. $], leaves - half));
 }
 
@@ -248,7 +255,7 @@ std.typecons.Nullable!Rope create(const(char)[] bytes) {
 /// auto a = create("abc").get;
 /// auto b = share(a);
 /// free(a);
-/// assert(equal(b, 0, "abc"));
+/// assert(equalAt(b, 0, "abc"));
 /// free(b);
 /// ---
 Rope share(const Rope t) @trusted {
@@ -279,48 +286,48 @@ void free(ref Rope t) {
 /// scope(exit) free(a);
 /// auto b = edit(a, 1, 5, "i").get;
 /// scope(exit) free(b);
-/// assert(length(b) == 2 && equal(b, 0, "hi"));
+/// assert(length(b) == 2 && equalAt(b, 0, "hi"));
 /// ---
 std.typecons.Nullable!Rope edit(const Rope from, size_t start, size_t end, const(char)[] replacement) @trusted {
 	auto t = cast(Node*) from.root;
 	immutable total = t is null ? 0 : t.length;
 	assert(start <= end && end <= total, "fp.rope.edit: range out of bounds");
 	// Widen to whole leaves so the split copies nothing, and take in a neighbour when the result would leave a small leaf.
-	size_t lo = start, hi = end, at, size;
+	size_t low = start, high = end, at, size;
 	if (start < total) {
 		leafAround(t, start, at, size);
-		lo = at;
+		low = at;
 	}
 	if (end > 0 && end < total) {
 		leafAround(t, end - 1, at, size);
-		hi = at + size;
+		high = at + size;
 	} else if (end == 0 && total > 0) {
 		leafAround(t, 0, at, size);
-		hi = size;
+		high = size;
 	}
-	if ((hi - lo) - (end - start) + replacement.length < maxLeaf / 2) {
-		if (lo > 0) {
-			leafAround(t, lo - 1, at, size);
-			lo = at;
+	if ((high - low) - (end - start) + replacement.length < maxLeaf / 2) {
+		if (low > 0) {
+			leafAround(t, low - 1, at, size);
+			low = at;
 		}
-		if (hi < total) {
-			leafAround(t, hi, at, size);
-			hi = at + size;
+		if (high < total) {
+			leafAround(t, high, at, size);
+			high = at + size;
 		}
 	}
 
-	immutable middle = (start - lo) + replacement.length + (hi - end);
-	auto scratch = cast(char*) fp.pointer.allocFunction(null, middle ? middle : 1);
+	immutable middle = (start - low) + replacement.length + (high - end);
+	auto scratch = cast(char*) fp.pointer.allocator(null, middle ? middle : 1);
 	if (scratch is null) return typeof(return).init;
-	scope(exit) cast(void) fp.pointer.allocFunction(scratch, 0);
-	copyRange(t, lo, start, scratch);
-	core.stdc.string.memcpy(scratch + (start - lo), replacement.ptr, replacement.length);
-	copyRange(t, end, hi, scratch + (start - lo) + replacement.length);
+	scope(exit) cast(void) fp.pointer.allocator(scratch, 0);
+	copyRange(t, low, start, scratch);
+	core.stdc.string.memcpy(scratch + (start - low), replacement.ptr, replacement.length);
+	copyRange(t, end, high, scratch + (start - low) + replacement.length);
 
 	Node* before, after, unused;
-	split(t, lo, before, unused);
+	split(t, low, before, unused);
 	release(unused);
-	split(t, hi, unused, after);
+	split(t, high, unused, after);
 	release(unused);
 	auto root = join(join(before, build(scratch[0 .. middle], (middle + maxLeaf - 1) / maxLeaf)), after);
 	if (root is refused) return typeof(return).init;
@@ -340,15 +347,15 @@ size_t length(const Rope t) {
 	return t.root is null ? 0 : t.root.length;
 }
 
-/// The number of newlines in `t`, one less than its number of lines.
+/// The number of line breaks (`\n`, `\r\n` or lone `\r`) in `t`, one less than its number of lines.
 ///
 /// Examples:
 /// ---
 /// auto t = create("a\nb\n").get;
 /// scope(exit) free(t);
-/// assert(newlines(t) == 2);
+/// assert(lineBreakCount(t) == 2);
 /// ---
-size_t newlines(const Rope t) {
+size_t lineBreakCount(const Rope t) {
 	return t.root is null ? 0 : t.root.newlines;
 }
 
@@ -373,8 +380,10 @@ size_t lineOf(const Rope t, size_t at) @trusted {
 			n = n.right;
 		}
 	}
-	for (const(char)* p = bytesOf(n), end = bytesOf(n) + at; (p = cast(const(char)*) core.stdc.string.memchr(p, '\n', end - p)) !is null; ++p)
-		++line;
+	const(char)* bytes = bytesOf(n);
+	for (size_t i = 0; i < at; ++i)
+		if (bytes[i] == '\n' || (bytes[i] == '\r' && (i + 1 == n.length || bytes[i + 1] != '\n')))
+			++line;
 	return line;
 }
 
@@ -392,7 +401,7 @@ size_t lineOf(const Rope t, size_t at) @trusted {
 /// ---
 size_t lineStart(const Rope t, size_t line) @trusted {
 	if (line == 0) return 0;
-	if (line > newlines(t)) return fp.pointer.notFound;
+	if (line > lineBreakCount(t)) return fp.pointer.notFound;
 	auto n = cast(Node*) t.root;
 	size_t base = 0;
 	while (n.left !is null) {
@@ -403,11 +412,13 @@ size_t lineStart(const Rope t, size_t line) @trusted {
 			n = n.right;
 		}
 	}
-	const(char)* p = bytesOf(n);
-	for (;; ++p) {
-		p = cast(const(char)*) core.stdc.string.memchr(p, '\n', bytesOf(n) + n.length - p);
-		if (--line == 0) return base + (p - bytesOf(n)) + 1;
+	const(char)* bytes = bytesOf(n);
+	for (size_t i = 0; i < n.length; ++i) {
+		if (bytes[i] == '\n' || (bytes[i] == '\r' && (i + 1 == n.length || bytes[i + 1] != '\n'))) {
+			if (--line == 0) return base + i + 1;
+		}
 	}
+	assert(0, "fp.rope.lineStart: line count mismatch");
 }
 
 /// Copies bytes `start` to `end` of `t` into `out_`, which must hold `end - start` bytes. It cannot fail.
@@ -431,11 +442,46 @@ void copy(const Rope t, size_t start, size_t end, char[] out_) @trusted {
 /// ---
 /// auto t = create("hello").get;
 /// scope(exit) free(t);
-/// assert(equal(t, 1, "ell") && !equal(t, 3, "lol"));
+/// assert(equalAt(t, 1, "ell") && !equalAt(t, 3, "lol"));
 /// ---
-bool equal(const Rope t, size_t start, const(char)[] s) @trusted {
+bool equalAt(const Rope t, size_t start, const(char)[] s) @trusted {
 	if (start > length(t) || s.length > length(t) - start) return false;
 	return equalRange(cast(Node*) t.root, start, s);
+}
+
+/// Whether `t` holds exactly the bytes of `s`.
+///
+/// Examples:
+/// ---
+/// auto t = create("hello").get;
+/// scope(exit) free(t);
+/// assert(equal(t, "hello") && !equal(t, "hell") && !equal(t, "hello!"));
+/// assert(equal(Rope.init, ""));
+/// ---
+bool equal(const Rope t, const(char)[] s) {
+	return length(t) == s.length && equalAt(t, 0, s);
+}
+
+/// All of `t`'s bytes as a new fp string, null for an empty rope. Returns null as well if allocation is refused; tell the two apart by `length(t)`. Free the result with `fp.string.free`.
+///
+/// Examples:
+/// ---
+/// static import fp.string;
+/// auto t = create("hello").get;
+/// scope(exit) free(t);
+/// char* flat = text(t);
+/// scope(exit) fp.string.free(flat);
+/// assert(fp.string.equal(flat, "hello"));
+/// ---
+char* text(const Rope t) @trusted {
+	immutable size = length(t);
+	if (size == 0) return null;
+	char* out_ = null;
+	if (fp.dynarray.growToSize(out_, size + 1) is null) return null;
+	copyRange(cast(Node*) t.root, 0, size, out_);
+	out_[size] = 0;
+	cast(void) fp.dynarray.removeLast(out_);
+	return out_;
 }
 
 
@@ -456,21 +502,21 @@ version(unittest) {
 
 	// Whether `t` reads as `s`, checked byte by byte, line by line, and through its balance.
 	private bool same(const Rope t, const(char)[] s) @trusted {
-		if (length(t) != s.length || !equal(t, 0, s)) return false;
+		if (!equal(t, s)) return false;
 		if (t.root !is null) cast(void) checkBalanced(cast(Node*) t.root);
 		size_t line = 0;
 		foreach (i, c; s) {
-			if (c != '\n') continue;
+			if (c != '\n' && (c != '\r' || (i + 1 < s.length && s[i + 1] == '\n'))) continue;
 			if (lineOf(t, i) != line || lineStart(t, line + 1) != i + 1 || lineOf(t, i + 1) != line + 1) return false;
 			++line;
 		}
-		return lineOf(t, s.length) == line && newlines(t) == line && lineStart(t, line + 1) == fp.pointer.notFound;
+		return lineOf(t, s.length) == line && lineBreakCount(t) == line && lineStart(t, line + 1) == fp.pointer.notFound;
 	}
 
 	private __gshared size_t liveBlocks;
-	private __gshared fp.pointer.AllocFunction countedUnderlying;
+	private __gshared fp.pointer.Allocator countedUnderlying;
 
-	private void* countingAlloc(void* p, size_t size) {
+	private void* countingAllocator(void* p, size_t size) {
 		if (p is null && size) ++liveBlocks;
 		if (p !is null && size == 0) --liveBlocks;
 		return countedUnderlying(p, size);
@@ -478,16 +524,14 @@ version(unittest) {
 }
 
 unittest { // versions: edits share what they leave alone, keep every older version intact, and stay balanced
-	countedUnderlying = fp.pointer.allocFunction;
-	fp.pointer.allocFunction = &countingAlloc;
-	scope(exit) fp.pointer.allocFunction = countedUnderlying;
+	countedUnderlying = fp.pointer.allocator;
+	fp.pointer.allocator = &countingAllocator;
+	scope(exit) fp.pointer.allocator = countedUnderlying;
 
 	assert(same(Rope.init, ""));
-	char* model = fp.string.makeDynamic("");
+	char* model = fp.string.clone("");
 	foreach (i; 0 .. 3000) {
-		char[24] line;
-		immutable n = core.stdc.stdio.snprintf(line.ptr, line.length, "x%d : T = %d\n", cast(int) i, cast(int) i);
-		assert(fp.string.concatenate(model, line[0 .. n]) !is null);
+		assert(fp.string.append(model, "x", i, " : T = ", i, "\n"));
 	}
 	scope(exit) fp.string.free(model);
 	auto original = create(fp.string.slice(model)).get;
@@ -512,11 +556,9 @@ unittest { // versions: edits share what they leave alone, keep every older vers
 	free(current);
 	// The first version is untouched by every edit made from it and its successors.
 	fp.string.free(model);
-	model = fp.string.makeDynamic("");
+	model = fp.string.clone("");
 	foreach (i; 0 .. 3000) {
-		char[24] line;
-		immutable n = core.stdc.stdio.snprintf(line.ptr, line.length, "x%d : T = %d\n", cast(int) i, cast(int) i);
-		assert(fp.string.concatenate(model, line[0 .. n]) !is null);
+		assert(fp.string.append(model, "x", i, " : T = ", i, "\n"));
 	}
 	assert(same(original, fp.string.slice(model)));
 
@@ -529,11 +571,11 @@ unittest { // versions: edits share what they leave alone, keep every older vers
 
 	// Inserting at the very start, and copying a range that spans leaves.
 	auto prefixed = edit(original, 0, 0, "<<").get;
-	assert(equal(prefixed, 0, "<<x0 : T = 0\n") && length(prefixed) == length(original) + 2);
+	assert(equalAt(prefixed, 0, "<<x0 : T = 0\n") && length(prefixed) == length(original) + 2);
 	free(prefixed);
 	char[2 * maxLeaf] copied;
 	copy(original, maxLeaf / 2, maxLeaf / 2 + copied.length, copied[]);
-	assert(equal(original, maxLeaf / 2, copied[]));
+	assert(equalAt(original, maxLeaf / 2, copied[]));
 	copy(original, 5, 5, copied[0 .. 0]);
 	free(original);
 	assert(liveBlocks == 1); // only the model
@@ -541,10 +583,16 @@ unittest { // versions: edits share what they leave alone, keep every older vers
 
 unittest { // refused allocations: create and edit return null and leave every version as it was
 	static immutable text = "a : T = 1\nb : T = 2\n";
+	auto crRope = create("x : T\ry : T\r").get;
+	scope(exit) free(crRope);
+	assert(same(crRope, "x : T\ry : T\r"));
+	auto crlfRope = create("x : T\r\ny : T\r\n").get;
+	scope(exit) free(crlfRope);
+	assert(same(crlfRope, "x : T\r\ny : T\r\n"));
 	for (size_t budget = 0;; ++budget) {
-		auto allocator = fp.testing.beginRationedAllocator(budget);
+		auto allocator = fp.testing.limitAllocations(budget);
 		auto made = create(text);
-		fp.testing.endRationedAllocator(allocator);
+		fp.testing.restoreAllocator(allocator);
 		if (made.isNull) continue;
 		auto t = made.get;
 		scope(exit) free(t);
@@ -552,20 +600,44 @@ unittest { // refused allocations: create and edit return null and leave every v
 		break;
 	}
 
-	char* big = fp.string.makeDynamic("");
+	char* big = fp.string.clone("");
 	scope(exit) fp.string.free(big);
-	foreach (i; 0 .. 10 * maxLeaf / 8) assert(fp.string.concatenate(big, "abcdefg\n") !is null);
+	foreach (i; 0 .. 10 * maxLeaf / 8) assert(fp.string.concatenate(big, "abcdefg\n"));
 	auto base = create(fp.string.slice(big)).get;
 	scope(exit) free(base);
 	for (size_t budget = 0;; ++budget) {
-		auto allocator = fp.testing.beginRationedAllocator(budget);
+		auto allocator = fp.testing.limitAllocations(budget);
 		auto edited = edit(base, 100, 3 * maxLeaf, "edit");
-		fp.testing.endRationedAllocator(allocator);
+		fp.testing.restoreAllocator(allocator);
 		assert(same(base, fp.string.slice(big)));
 		if (edited.isNull) continue;
 		auto t = edited.get;
 		scope(exit) free(t);
-		assert(length(t) == fp.string.length(big) - (3 * maxLeaf - 100) + 4 && equal(t, 100, "edit"));
+		assert(length(t) == fp.string.length(big) - (3 * maxLeaf - 100) + 4 && equalAt(t, 100, "edit"));
 		break;
 	}
+}
+
+unittest { // a container of ropes shares each it copies and frees each it drops; text flattens a rope across leaves
+	static import fp.dynarray;
+	static import fp.string;
+	auto big = create("x").get;
+	scope(exit) free(big);
+	foreach (i; 0 .. 3) {
+		auto longer = edit(big, length(big), length(big), "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef").get;
+		free(big);
+		big = longer;
+	}
+	Rope* versions = null;
+	assert(fp.dynarray.pushBack(versions, share(big)));
+	Rope* copies = fp.dynarray.clone(versions);
+	assert(copies !is null && equal(copies[0], "x" ~ "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+		~ "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+		~ "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"));
+	fp.dynarray.free(versions);
+	fp.dynarray.free(copies); // each dropped copy releases its share; `big` still reads
+	char* flat = text(big);
+	scope(exit) fp.string.free(flat);
+	assert(fp.string.length(flat) == length(big) && equal(big, fp.string.slice(flat)) && flat[length(big)] == 0);
+	assert(text(Rope.init) is null);
 }
