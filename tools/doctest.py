@@ -105,7 +105,7 @@ def main():
 	for old in glob.glob(os.path.join(out, '*.d')):
 		os.remove(old)
 
-	sources = sorted(glob.glob(os.path.join(root, 'source', 'fp', '*.d')))
+	sources = sorted(glob.glob(os.path.join(root, 'source', 'fp', '**', '*.d'), recursive=True))
 	modules = []
 	problems = []
 	generated = []

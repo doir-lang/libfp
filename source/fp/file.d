@@ -19,6 +19,7 @@ static import std.typecons;
 
 static import fp.dynarray;
 static import fp.string;
+static import fp.string.utf;
 
 version(Windows) {} else static import core.sys.posix.unistd;
 
@@ -42,7 +43,7 @@ version(Windows) private extern(C) core.stdc.stdio.FILE* _wfopen(const(wchar)* p
 private core.stdc.stdio.FILE* open(const(char)[] path, const(char)* mode) @trusted {
 	version(Windows) {
 		// fopen would read `path` in the ANSI code page rather than as UTF-8.
-		wchar* name = fp.string.utf16(path);
+		wchar* name = fp.string.utf.toUtf16(path).get(null);
 		if (name is null) return null;
 		scope(exit) fp.dynarray.free(name);
 		wchar[4] wideMode = 0;
@@ -52,7 +53,7 @@ private core.stdc.stdio.FILE* open(const(char)[] path, const(char)* mode) @trust
 		}
 		return _wfopen(name, wideMode.ptr);
 	} else {
-		char* name = fp.string.clone(path);
+		char* name = fp.string.clone(path).get(null);
 		if (name is null) return null;
 		scope(exit) fp.string.free(name);
 		return core.stdc.stdio.fopen(name, mode);
@@ -162,12 +163,12 @@ version(Windows) private extern(C) int _wremove(const(wchar)* path);
 /// ---
 bool removeFile(const(char)[] path) @trusted {
 	version(Windows) {
-		wchar* name = fp.string.utf16(path);
+		wchar* name = fp.string.utf.toUtf16(path).get(null);
 		if (name is null) return false;
 		scope(exit) fp.dynarray.free(name);
 		return _wremove(name) == 0;
 	} else {
-		char* name = fp.string.clone(path);
+		char* name = fp.string.clone(path).get(null);
 		if (name is null) return false;
 		scope(exit) fp.string.free(name);
 		return core.stdc.stdio.remove(name) == 0;
@@ -197,7 +198,7 @@ version(posixMapping) {
 		static import core.sys.posix.sys.mman;
 		static import core.sys.posix.sys.stat;
 		static import core.sys.posix.unistd;
-		char* name = fp.string.clone(path);
+		char* name = fp.string.clone(path).get(null);
 		if (name is null) return typeof(return).init;
 		scope(exit) fp.string.free(name);
 		immutable descriptor = core.sys.posix.fcntl.open(name, access);
@@ -218,7 +219,7 @@ version(windowsMapping) {
 	private std.typecons.Nullable!WritableMappedFile mapWith(const(char)[] path, uint access, uint protection, uint view, bool keepFile) @trusted {
 		static import core.sys.windows.winbase;
 		static import core.sys.windows.winnt;
-		wchar* name = fp.string.utf16(path);
+		wchar* name = fp.string.utf.toUtf16(path).get(null);
 		if (name is null) return typeof(return).init;
 		scope(exit) fp.dynarray.free(name);
 		// Sharing everything matches POSIX, where a mapping locks nothing. Without backup semantics a directory does not open.
@@ -328,7 +329,7 @@ std.typecons.Nullable!WritableMappedFile mapForWriting(const(char)[] path) @trus
 		auto f = open(path, "r+b");
 		if (f is null) return typeof(return).init;
 		cast(void) core.stdc.stdio.fclose(f);
-		char* name = fp.string.clone(path);
+		char* name = fp.string.clone(path).get(null);
 		if (name is null) return typeof(return).init;
 		auto text = readFile(path);
 		if (text.isNull) {
@@ -568,7 +569,7 @@ unittest { // reading, writing, appending and mapping one file: what is written 
 		free(readIn);
 		assert(readIn.bytes is null);
 		auto writableText = readFile(name);
-		char* copiedName = fp.string.clone(name);
+		char* copiedName = fp.string.clone(name).get(null);
 		assert(copiedName !is null);
 		auto writableReadIn = WritableMappedFile(fp.string.slice(writableText.get), copiedName);
 		writableReadIn.bytes[0] = 'N';
@@ -598,7 +599,7 @@ unittest { // reading, writing, appending and mapping one file: what is written 
 	assert(free(unicodeWritable.get));
 	version(Windows) {
 		static import core.sys.windows.winbase;
-		wchar* wideName = fp.string.utf16(unicodeName);
+		wchar* wideName = fp.string.utf.toUtf16(unicodeName).get(null);
 		assert(wideName !is null);
 		assert(core.sys.windows.winbase.DeleteFileW(wideName));
 		fp.dynarray.free(wideName);

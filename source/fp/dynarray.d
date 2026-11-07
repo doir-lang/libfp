@@ -559,7 +559,7 @@ size_t retain(alias keep, T)(T* array) @trusted {
 	return before - kept;
 }
 
-/// Removes every element equal (`fp.lifecycle.equal`) to the one before it, so a sorted array holds each value once; the capacity is kept. Returns how many were removed. It cannot fail.
+/// Removes every element the same as the last one kept before it, so a sorted array holds each value once; the capacity is kept. `same(kept, element)` decides, `fp.lifecycle.equal` by default. Returns how many were removed. It cannot fail.
 ///
 /// Examples:
 /// ---
@@ -569,13 +569,14 @@ size_t retain(alias keep, T)(T* array) @trusted {
 /// assert(concatenate(array, values[]));
 /// assert(unique(array) == 3);
 /// assert(slice(array) == [1, 2, 3]);
+/// assert(unique!((kept, x) => x - kept < 2)(array) == 1 && slice(array) == [1, 3]);
 /// ---
-size_t unique(T)(T* array) @trusted {
+size_t unique(alias same = fp.lifecycle.equal, T)(T* array) @trusted {
 	immutable before = length(array);
 	if (before == 0) return 0;
 	size_t kept = 1;
 	foreach (i; 1 .. before) {
-		if (fp.lifecycle.equal(array[i], array[kept - 1])) {
+		if (same(array[kept - 1], array[i])) {
 			fp.lifecycle.endLifetime(array[i]);
 			continue;
 		}

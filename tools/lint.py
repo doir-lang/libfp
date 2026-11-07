@@ -36,7 +36,8 @@ CONFIG = {
 		'posix-yield': [],
 		'raw-memcmp': [],
 		'raw-byte-hash': ['source/fp/hash.d', 'source/fp/hashtable.d', 'source/fp/lifecycle.d'],
-		'snprintf-buffer': ['source/fp/string.d'],
+		'snprintf-buffer': ['source/fp/string/numbers.d'],
+		'hand-written-line-break': ['source/fp/string/package.d'],
 	},
 }
 
@@ -61,7 +62,13 @@ PUSHED = [
 	('make-dynamic', r'\bmakeDynamic\b', 'makeDynamic', 'use fp.string.clone'),
 	('size-max-sentinel', r'[!=]=\s*size_t\.max\b', 'raw size_t.max sentinel', 'compare against fp.pointer.notFound'),
 	('qsort', r'\bqsort\b|\bextern\s*\(\s*C\s*\)\s*int\s+compare', 'qsort with a C comparator', 'use std.algorithm.sorting.sort'),
-	('snprintf-buffer', r'\bsnprintf\s*\(', 'snprintf into a local buffer', 'use fp.string.format or fp.string.appendUnsigned'),
+	('snprintf-buffer', r'\bsnprintf\s*\(', 'snprintf into a local buffer', 'use fp.string.format or fp.string.numbers.appendUnsigned'),
+	('fp-string-ascii', r'\bfp\.string\.(isDigit|isOctalDigit|isHexDigit|isAsciiAlpha|equalIgnoringAsciiCase)\b', 'character class or case-insensitive comparison through fp.string', 'use fp.string.ascii (isDigit, isHexDigit, isLetter, equalIgnoringCase)'),
+	('fp-string-numbers', r'\bfp\.string\.(maxDecimalLength|formatUnsigned|formatSigned|appendUnsigned|appendSigned|appendHex|appendFloat|hexDigitValue|parseUnsigned|parseFloat|Unsigned|Float)\b', 'number formatting or parsing through fp.string', 'use fp.string.numbers'),
+	('fp-string-utf', r'\bfp\.string\.(Utf8Error|encodeUtf8|decodeUtf8|utf8SequenceLength|utf16Length|appendCodepoint|inCodepointRanges|codepoints|utf16|fromCodepoints|fromUtf16)\b', 'UTF-8 or UTF-16 through fp.string', 'use fp.string.utf (EncodeError, encode, decode, sequenceLength, utf16Length, append, inRanges, codepoints, toUtf16, fromCodepoints, fromUtf16)'),
+	('renamed-replace-hash', r'\bfp\.string\.replace\s*\(|\bhashBytesFast\b', 'fp.string.replace or fp.algorithms.hashBytesFast, since renamed', 'use fp.string.replaceAll or fp.algorithms.hashShortBytes'),
+	('hand-written-line-break', r'==\s+\|\|\s*\(\s*[\w.]+\[[^\]]+\]\s*==\s+&&\s*\(', 'line break (\\n, \\r\\n or lone \\r) tested by hand', 'use fp.string.breaksLine, lineOf, lineStart or lineEnd'),
+	('hand-written-trim', r'while\s*\(\s*([\w.]+)\.length\s*&&\s*\(\s*\1\[\s*(0|\$\s*-\s*1)\s*\]\s*==', 'leading or trailing characters trimmed by hand', 'use fp.string.trim, trimStart or trimEnd'),
 ]
 
 PLATFORM = re.compile(r'\bcore\s*\.\s*sys\s*\.')

@@ -513,7 +513,7 @@ private const(T)[] ownedElements(T)(const(T)* p) @trusted {
 ///
 /// Examples:
 /// ---
-/// char* text = fp.string.clone("hi");
+/// char* text = fp.string.clone("hi").get;
 /// Owned!char* lines = null;
 /// fp.dynarray.pushBack(lines, Owned!char(text));
 /// fp.dynarray.free(lines); // frees the string with the array
@@ -536,7 +536,7 @@ struct Owned(T) {
 	///
 	/// Examples:
 	/// ---
-	/// auto a = Owned!char(fp.string.clone("hi")), b = Owned!char(fp.string.clone("hi"));
+	/// auto a = Owned!char(fp.string.clone("hi").get), b = Owned!char(fp.string.clone("hi").get);
 	/// scope(exit) { a.finalize(); b.finalize(); }
 	/// Owned!char none, empty = Owned!char(fp.dynarray.create!char(0));
 	/// scope(exit) empty.finalize();
@@ -564,7 +564,7 @@ struct Owned(T) {
 	///
 	/// Examples:
 	/// ---
-	/// auto a = Owned!char(fp.string.clone("hi")), b = Owned!char(fp.string.clone("hi"));
+	/// auto a = Owned!char(fp.string.clone("hi").get), b = Owned!char(fp.string.clone("hi").get);
 	/// scope(exit) { a.finalize(); b.finalize(); }
 	/// assert(Owned!char.contentHash(a) == Owned!char.contentHash(b));
 	/// ---
@@ -650,7 +650,7 @@ unittest {
 	FailingCopy badSource, badDest;
 	assert(!copyInto(badDest, badSource));
 
-	auto ownedStr = Owned!char(fp.string.clone("hello"));
+	auto ownedStr = Owned!char(fp.string.clone("hello").get);
 	scope(exit) ownedStr.finalize();
 	auto previous = fp.testing.limitAllocations(0);
 	Owned!char ownedCopy;

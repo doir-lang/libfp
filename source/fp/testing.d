@@ -15,6 +15,7 @@ module fp.testing;
 static import fp.dynarray;
 static import fp.pointer;
 static import fp.string;
+static import fp.string.utf;
 
 
 // --- running tests ---------------------------------------------------------------
@@ -118,7 +119,7 @@ char* temporaryDirectory() @trusted {
 		if (length == 0 || length >= buffer.length) return null;
 		const(wchar)[] path = buffer[0 .. length];
 		while (path.length > 1 && (path[$ - 1] == '\\' || path[$ - 1] == '/')) path = path[0 .. $ - 1];
-		return fp.string.fromUtf16(path);
+		return fp.string.utf.fromUtf16(path).get(null);
 	} else {
 		version(WASI) const(char)[] path = "/tmp";
 		else {
@@ -128,7 +129,7 @@ char* temporaryDirectory() @trusted {
 			const(char)[] path = variable is null || *variable == 0 ? "/tmp" : variable[0 .. core.stdc.string.strlen(variable)];
 		}
 		while (path.length > 1 && path[$ - 1] == '/') path = path[0 .. $ - 1];
-		return fp.string.clone(path);
+		return fp.string.clone(path).get(null);
 	}
 }
 
@@ -153,7 +154,7 @@ char* temporaryFile() @trusted {
 	version(Windows) {
 		static import core.sys.windows.winbase;
 		static import core.sys.windows.windef;
-		wchar* wideDirectory = fp.string.utf16(directory);
+		wchar* wideDirectory = fp.string.utf.toUtf16(directory).get(null);
 		if (wideDirectory is null) return null;
 		scope(exit) fp.dynarray.free(wideDirectory);
 		wchar[core.sys.windows.windef.MAX_PATH + 1] wide = 0;
@@ -161,7 +162,7 @@ char* temporaryFile() @trusted {
 		if (core.sys.windows.winbase.GetTempFileNameW(wideDirectory, "fp"w.ptr, 0, wide.ptr) == 0) return null;
 		size_t length = 0;
 		while (wide[length] != 0) ++length;
-		char* path = fp.string.fromUtf16(wide[0 .. length]);
+		char* path = fp.string.utf.fromUtf16(wide[0 .. length]).get(null);
 		if (path is null) cast(void) core.sys.windows.winbase.DeleteFileW(wide.ptr);
 		return path;
 	} else version(WASI) {
@@ -240,7 +241,7 @@ unittest { // temporary files are new, empty and distinct, inside a directory na
 		static import core.stdc.stdlib;
 		static import core.sys.posix.stdlib;
 		const(char)* saved = core.stdc.stdlib.getenv("TMPDIR");
-		char* kept = saved is null ? null : fp.string.clone(fp.string.slice(saved));
+		char* kept = saved is null ? null : fp.string.clone(fp.string.slice(saved)).get(null);
 		scope(exit) fp.string.free(kept);
 		assert(saved is null || kept !is null);
 		assert(core.sys.posix.stdlib.setenv("TMPDIR", "/nonexistent-fp-directory", 1) == 0);

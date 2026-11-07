@@ -8,7 +8,7 @@ Usage:
   tools/wasi.py --serve    ... then serve bin/wasi on http://localhost:8000 to open in a browser
   tools/wasi.py --node     ... then run the same page script under Node, exiting with the tests' status
 """
-import argparse, functools, http.server, os, shutil, subprocess, sys, tarfile, urllib.request
+import argparse, functools, glob, http.server, os, shutil, subprocess, sys, tarfile, urllib.request
 
 root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 out = os.path.join(root, 'bin', 'wasi')
@@ -46,7 +46,7 @@ def build():
 		fetch(f'libclang_rt-{sdk_version}.0'), 'wasm32-unknown-wasip1-threads', 'libclang_rt.builtins.a')
 	libs = os.path.join(sysroot, 'lib', target)
 
-	sources = [os.path.join('source', 'fp', f) for f in sorted(os.listdir(os.path.join(root, 'source', 'fp'))) if f.endswith('.d')]
+	sources = sorted(os.path.relpath(p, root) for p in glob.glob(os.path.join(root, 'source', 'fp', '**', '*.d'), recursive=True))
 	os.makedirs(out, exist_ok=True)
 	compile = [compiler, '-mtriple=wasm32-unknown-wasi', '-mattr=+atomics,+bulk-memory', '-betterC', '-checkaction=C', '-unittest',
 		'-Isource', '-Itests', '-od=' + out, *sources, os.path.join('tests', 'runner.d')]
