@@ -472,6 +472,53 @@ bool writeAll(int descriptor, const(char)[] bytes) {
 	return true;
 }
 
+version(Windows) private extern(C) {
+	int _pipe(int* descriptors, uint size, int mode);
+	int _close(int descriptor);
+}
+
+/// Closes the open descriptor `descriptor`.
+///
+/// Returns false if `descriptor` was not open or closing it failed; it is not open afterwards either way.
+///
+/// Examples:
+/// ---
+/// assert(!close(-1));
+/// ---
+bool close(int descriptor) @trusted {
+	version(Windows) return guarded(descriptor, () => _close(descriptor)) == 0;
+	else return core.sys.posix.unistd.close(descriptor) == 0;
+}
+
+/// The two ends of a pipe, as `createPipe` opens them: what is written to `writing` is read from `reading`.
+struct Pipe {
+	int reading = -1; /// The descriptor to read from.
+	int writing = -1; /// The descriptor to write to.
+}
+
+/// Opens a pipe, both of whose ends the caller closes with `close`; on Windows they are C runtime descriptors in binary mode, with a 64 KiB buffer.
+///
+/// Returns an empty `Nullable` if the system refused, as it does when the process has too many descriptors open, and always on WASI, which has no pipes.
+///
+/// Examples:
+/// ---
+/// version(WASI) {} else {
+/// 	auto pipe = createPipe().get;
+/// 	char[2] read;
+/// 	assert(writeAll(pipe.writing, "hi") && readSome(pipe.reading, read[]) == 2 && read == "hi");
+/// 	assert(close(pipe.writing) && readSome(pipe.reading, read[]) == 0 && close(pipe.reading));
+/// }
+/// ---
+std.typecons.Nullable!Pipe createPipe() @trusted {
+	int[2] descriptors;
+	version(WASI) return typeof(return).init;
+	else {
+		version(Windows) immutable made = _pipe(descriptors.ptr, 65_536, binaryMode) == 0;
+		else immutable made = core.sys.posix.unistd.pipe(descriptors) == 0;
+		return made ? typeof(return)(Pipe(descriptors[0], descriptors[1])) : typeof(return).init;
+	}
+}
+
 
 // --- the console -------------------------------------------------------------
 
@@ -1115,6 +1162,17 @@ unittest { // descriptors: bytes written read back in pieces and whole, line end
 	scope(exit) cast(void) core.stdc.stdio.fclose(readOnly);
 	assert(writeSome(core.stdc.stdio.fileno(readOnly), "x") == -1 && !writeAll(core.stdc.stdio.fileno(readOnly), "x"));
 	assert(readSome(-1, piece[]) == -1 && writeSome(-1, "x") == -1 && !writeAll(-1, "x"));
+
+	// A pipe carries bytes from its writing end to its reading end, which ends once the writing end closes; a closed end is not open.
+	version(WASI) assert(createPipe().isNull);
+	else {
+		auto pipe = createPipe().get;
+		assert(writeAll(pipe.writing, "piped\n"));
+		assert(readSome(pipe.reading, piece[]) == 6 && piece[0 .. 6] == "piped\n");
+		assert(close(pipe.writing) && !close(pipe.writing) && !writeAll(pipe.writing, "x"));
+		assert(readSome(pipe.reading, piece[]) == 0 && close(pipe.reading));
+	}
+	assert(!close(-1));
 }
 
 unittest { // the console: printed values read back a line, word or token at a time, every break counted once, even one split between two reads
