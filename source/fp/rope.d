@@ -429,6 +429,20 @@ size_t lineStart(const Rope t, size_t line) @trusted {
 	assert(0, "fp.rope.lineStart: line count mismatch");
 }
 
+/// Where the line holding byte `start` of `t` ends, as `fp.string.lineEnd` finds it in a flat string: the offset of the line break after `start`, the `\r` of a `\r\n`, or `length(t)` if none follows. `start` may be `length(t)`. O(log n); it cannot fail.
+///
+/// Examples:
+/// ---
+/// auto t = create("ab\r\ncd\ne").get;
+/// scope(exit) free(t);
+/// assert(lineEnd(t, 0) == 2 && lineEnd(t, 2) == 2 && lineEnd(t, 4) == 6 && lineEnd(t, 7) == 8 && lineEnd(t, 8) == 8);
+/// ---
+size_t lineEnd(const Rope t, size_t start) {
+	immutable next = lineStart(t, lineOf(t, start) + 1);
+	if (next == fp.pointer.notFound) return length(t);
+	return next >= 2 && equalAt(t, next - 2, "\r\n") ? next - 2 : next - 1;
+}
+
 /// Copies bytes `start` to `end` of `t` into `out_`, which must hold `end - start` bytes. It cannot fail.
 ///
 /// Examples:
@@ -513,9 +527,11 @@ version(unittest) {
 		if (!equal(t, s)) return false;
 		if (t.root !is null) cast(void) checkBalanced(cast(Node*) t.root);
 		size_t line = 0;
+		if (lineEnd(t, 0) != fp.string.lineEnd(s, 0)) return false;
 		foreach (i; 0 .. s.length) {
 			if (!fp.string.breaksLine(s, i)) continue;
 			if (lineOf(t, i) != line || lineStart(t, line + 1) != i + 1 || lineOf(t, i + 1) != line + 1) return false;
+			if (lineEnd(t, i + 1) != fp.string.lineEnd(s, i + 1)) return false;
 			++line;
 		}
 		return lineOf(t, s.length) == line && lineBreakCount(t) == line && lineStart(t, line + 1) == fp.pointer.notFound;
@@ -537,6 +553,10 @@ unittest { // versions: edits share what they leave alone, keep every older vers
 	scope(exit) fp.pointer.allocator = countedUnderlying;
 
 	assert(same(Rope.init, ""));
+	static immutable mixed = "a\r\nb\rc\n\r\nd";
+	auto breaks = create(mixed).get;
+	assert(same(breaks, mixed) && lineEnd(breaks, 1) == 1 && lineEnd(breaks, 3) == 4);
+	free(breaks);
 	char* model = null;
 	foreach (i; 0 .. 3000) {
 		assert(fp.string.append(model, "x", i, " : T = ", i, "\n"));
