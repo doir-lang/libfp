@@ -235,8 +235,14 @@ size_t codepointCount(S)(S text) if (fp.string.isStringLike!S) {
 	return count;
 }
 
-// The UTF-16 units byte `c` adds: 2 where it starts a four-byte sequence, 0 for a continuation byte, and 1 otherwise.
-private size_t utf16Units(char c) {
+/// The UTF-16 code units byte `c` of UTF-8 text adds: 2 where it starts a four-byte sequence, 0 for a continuation byte, and 1 otherwise, so summing it over a valid sequence's bytes gives the units the sequence takes, as `utf16Length` does over a whole text, and a byte at a time suits text read in pieces.
+///
+/// Examples:
+/// ---
+/// assert(utf16Units('a') == 1 && utf16Units("é"[0]) == 1 && utf16Units("é"[1]) == 0);
+/// assert(utf16Units("😀"[0]) == 2 && utf16Units("😀"[3]) == 0);
+/// ---
+size_t utf16Units(char c) {
 	if ((c & 0xC0) == 0x80) return 0;
 	return sequenceLength(c) == 4 ? 2 : 1;
 }
@@ -296,7 +302,7 @@ unittest { // well-formed and ill-formed sequences, validation, counting and ran
 	}
 	size_t at = 0;
 	assert(decode("\xf4\x8f\xbf\xbf", at) == 0x10FFFF && at == 4);
-	assert(sequenceLength('\x80') == 1 && sequenceLength('\xFF') == 1 && utf16Length("\xFF") == 1);
+	assert(sequenceLength('\x80') == 1 && sequenceLength('\xFF') == 1 && utf16Length("\xFF") == 1 && utf16Units('\xF0') == 2 && utf16Units('\xBF') == 0);
 	assert(firstInvalid("ok\xc3A") == 2 && codepointCount("ok\xc3A") == 4);
 	assert(firstInvalid("héllo") == fp.pointer.notFound);
 

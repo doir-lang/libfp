@@ -470,28 +470,29 @@ bool equal(const Rope t, const(char)[] s) {
 	return length(t) == s.length && equalAt(t, 0, s);
 }
 
-/// All of `t`'s bytes as a new fp string, null for an empty rope. Returns null, rather than a null string, if the string could not be allocated. Free the result with `fp.string.free`.
+/// Bytes `start` to `end` of `t` as a new fp string, null for an empty range; `start` and `end` must lie within `t`, `start` first. Free the result with `fp.string.free`.
+///
+/// Returns an empty `Nullable`, rather than a null string, if the string could not be allocated.
 ///
 /// Examples:
 /// ---
 /// static import fp.string;
 /// auto t = create("hello").get;
 /// scope(exit) free(t);
-/// char* flat = text(t).get;
-/// scope(exit) fp.string.free(flat);
-/// assert(fp.string.equal(flat, "hello"));
-/// assert(text(Rope.init).get is null);
+/// char* middle = text(t, 1, 4).get;
+/// scope(exit) fp.string.free(middle);
+/// assert(fp.string.equal(middle, "ell"));
+/// assert(text(t, 2, 2).get is null);
 /// ---
-std.typecons.Nullable!(char*) text(const Rope t) @trusted {
-	immutable size = length(t);
-	if (size == 0) return typeof(return)(null);
+std.typecons.Nullable!(char*) text(const Rope t, size_t start, size_t end) @trusted {
+	assert(start <= end && end <= length(t), "fp.rope.text: range out of bounds");
+	if (end == start) return typeof(return)(null);
 	char* out_ = null;
 	// The allocation's terminator, past the capacity, ends the string.
-	if (fp.dynarray.growToSize(out_, size) is null) return typeof(return).init;
-	copyRange(cast(Node*) t.root, 0, size, out_);
+	if (fp.dynarray.growToSize(out_, end - start) is null) return typeof(return).init;
+	copyRange(cast(Node*) t.root, start, end, out_);
 	return typeof(return)(out_);
 }
-
 
 version(unittest) {
 	static import core.stdc.stdio;
@@ -643,11 +644,14 @@ unittest { // a container of ropes shares each it copies and frees each it drops
 		~ "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"));
 	fp.dynarray.free(versions);
 	fp.dynarray.free(copies); // each dropped copy releases its share; `big` still reads
-	char* flat = text(big).get;
+	char* flat = text(big, 0, length(big)).get;
 	scope(exit) fp.string.free(flat);
 	assert(fp.string.length(flat) == length(big) && equal(big, fp.string.slice(flat)) && flat[length(big)] == 0);
-	assert(!text(Rope.init).isNull && text(Rope.init).get is null);
+	char* middle = text(big, 100, 300).get;
+	scope(exit) fp.string.free(middle);
+	assert(fp.string.length(middle) == 200 && equalAt(big, 100, fp.string.slice(middle)) && middle[200] == 0);
+	assert(!text(Rope.init, 0, 0).isNull && text(Rope.init, 0, 0).get is null);
 	auto rationed = fp.testing.limitAllocations(0);
-	assert(text(big).isNull); // refused, as distinct from an empty rope
+	assert(text(big, 0, length(big)).isNull); // refused, as distinct from an empty rope
 	fp.testing.restoreAllocator(rationed);
 }
