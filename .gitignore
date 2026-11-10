@@ -11,3 +11,5 @@ libfp.exe
 *.pdb
 bin
 *.lst
+__pycache__/
+*.pyc

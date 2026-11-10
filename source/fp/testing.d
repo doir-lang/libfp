@@ -12,7 +12,11 @@
 /// ---
 module fp.testing;
 
+static import core.stdc.stdio;
+static import std.typecons;
+
 static import fp.dynarray;
+static import fp.io;
 static import fp.pointer;
 static import fp.string;
 static import fp.string.utf;
@@ -135,16 +139,16 @@ char* temporaryDirectory() @trusted {
 
 version(WASI) private __gshared size_t temporaryFiles;
 
-/// Creates an empty file with a name no other file has in `temporaryDirectory`, and returns its path as a new fp string. The caller removes the file, as with `fp.file.removeFile`, and frees the path.
+/// Creates an empty file with a name no other file has in `temporaryDirectory`, and returns its path as a new fp string. The caller removes the file, as with `fp.io.removeFile`, and frees the path.
 ///
 /// Returns null if the file cannot be created or an allocation is refused, leaving no file behind.
 ///
 /// Examples:
 /// ---
-/// static import fp.file;
+/// static import fp.io;
 /// static import fp.string;
 /// char* path = temporaryFile();
-/// assert(path !is null && fp.file.removeFile(fp.string.slice(path)));
+/// assert(path !is null && fp.io.removeFile(fp.string.slice(path)));
 /// fp.string.free(path);
 /// ---
 char* temporaryFile() @trusted {
@@ -196,6 +200,142 @@ char* temporaryFile() @trusted {
 	}
 }
 
+/// A temporary file open for writing, as `openScratchFile` makes it, for a test to print into through `descriptor` and read back from `path`; `free` closes and removes it.
+struct ScratchFile {
+	char* path; /// The file's path, an fp string.
+	int descriptor; /// A descriptor writing to the file, from its start.
+	private core.stdc.stdio.FILE* file;
+}
+
+/// Creates a temporary file, as `temporaryFile` does, and opens it for writing.
+///
+/// Returns null if the file cannot be created or opened or an allocation is refused, leaving no file behind.
+///
+/// Examples:
+/// ---
+/// static import fp.io;
+/// auto scratch = openScratchFile();
+/// assert(!scratch.isNull);
+/// scope(exit) free(scratch.get);
+/// assert(fp.io.writeAll(scratch.get.descriptor, "printed"));
+/// ---
+std.typecons.Nullable!ScratchFile openScratchFile() @trusted {
+	ScratchFile scratch;
+	scratch.path = temporaryFile();
+	if (scratch.path is null) return typeof(return).init;
+	scratch.file = core.stdc.stdio.fopen(scratch.path, "wb");
+	if (scratch.file is null) {
+		cast(void) fp.io.removeFile(fp.string.slice(scratch.path));
+		fp.string.free(scratch.path);
+		return typeof(return).init;
+	}
+	scratch.descriptor = core.stdc.stdio.fileno(scratch.file);
+	return typeof(return)(scratch);
+}
+
+/// Closes and removes the file `scratch` names, and frees its path, leaving `scratch` empty. It cannot fail.
+///
+/// Examples:
+/// ---
+/// auto scratch = openScratchFile();
+/// assert(!scratch.isNull);
+/// free(scratch.get);
+/// assert(scratch.get.path is null);
+/// ---
+void free(ref ScratchFile scratch) @trusted {
+	cast(void) core.stdc.stdio.fclose(scratch.file);
+	cast(void) fp.io.removeFile(fp.string.slice(scratch.path));
+	fp.string.free(scratch.path);
+	scratch = ScratchFile.init;
+}
+
+
+// --- catching abort ----------------------------------------------------------
+
+/// Whether `aborts` exists: on WASI `abort` traps, ending every thread, so nothing can catch it.
+///
+/// Examples:
+/// ---
+/// static if (catchesAborts) assert(!aborts(() {}));
+/// ---
+version(WASI) enum bool catchesAborts = false;
+else enum bool catchesAborts = true;
+
+// druntime passes `sigjmp_buf` by value and lacks it on Darwin, so these take an oversized buffer by pointer.
+version(WASI) {} else version(Posix) {
+	static import core.sys.posix.signal;
+
+	// glibc and uClibc export only `__sigsetjmp`, their `sigsetjmp` being a macro around it.
+	version(CRuntime_Glibc) version = FpUnderscoredSigsetjmp;
+	else version(CRuntime_UClibc) version = FpUnderscoredSigsetjmp;
+
+	version(FpUnderscoredSigsetjmp) private extern(C) int __sigsetjmp(void* buffer, int saveMask);
+	else private extern(C) int sigsetjmp(void* buffer, int saveMask);
+	private extern(C) void siglongjmp(void* buffer, int value);
+
+	// Larger than any C library's `sigjmp_buf`: glibc's on PowerPC, the biggest, is just under 600 bytes.
+	private __gshared align(16) ubyte[1024] abortEscape;
+} else version(Windows) {
+	// The MS C runtime calls a `SIGABRT` handler from inside `abort`, so a plain `longjmp` leaves it; a null frame skips SEH unwinding.
+	private extern(C) int _setjmp(void* buffer, void* frame);
+	private extern(C) void longjmp(void* buffer, int value);
+
+	// `core.stdc.signal` declares `signal` without `@nogc nothrow`, so bind it here. `SIGABRT` is 22 on Windows.
+	private alias AbortHandler = extern(C) void function(int) @nogc nothrow;
+	private extern(C) AbortHandler signal(int sig, AbortHandler handler);
+	private enum int windowsSigabrt = 22;
+
+	// x86-64's `jmp_buf`, the largest, is 256 bytes.
+	private __gshared align(16) ubyte[512] abortEscape;
+}
+
+version(WASI) {} else {
+	private extern(C) void onAbort(int) {
+		// Windows resets a handler to the default as it raises, so reinstall it to keep one arming good for any number of aborts.
+		version(Windows) cast(void) signal(windowsSigabrt, &onAbort);
+		version(Posix) siglongjmp(abortEscape.ptr, 1);
+		else version(Windows) longjmp(abortEscape.ptr, 1);
+	}
+
+	/// Runs `attempt` and reports whether it called C's `abort`, as `fp.io.abort` does, by catching its `SIGABRT` and jumping back out of the handler. An abort abandons `attempt` where it stood: its `scope(exit)` blocks do not run and what it allocated leaks, so keep it small. It cannot fail; it asserts if the handler cannot be installed. It exists only where `catchesAborts` is true.
+	///
+	/// Examples:
+	/// ---
+	/// static import fp.io;
+	/// static if (catchesAborts) {
+	/// 	assert(aborts(() { fp.io.abort("fp.testing: an expected abort\n"); }));
+	/// 	assert(!aborts(() {}));
+	/// }
+	/// ---
+	bool aborts(scope void delegate() @nogc nothrow attempt) @trusted {
+		version(Posix) {
+			core.sys.posix.signal.sigaction_t action, saved;
+			assert(core.sys.posix.signal.sigemptyset(&action.sa_mask) == 0);
+			action.sa_handler = &onAbort;
+			assert(core.sys.posix.signal.sigaction(core.sys.posix.signal.SIGABRT, &action, &saved) == 0);
+		} else version(Windows) {
+			auto saved = signal(windowsSigabrt, &onAbort);
+		}
+
+		// `setjmp` records the frame it was called from, so it must be called here, in the frame being returned to.
+		version(FpUnderscoredSigsetjmp) immutable landed = __sigsetjmp(abortEscape.ptr, 1) != 0;
+		else version(Posix) immutable landed = sigsetjmp(abortEscape.ptr, 1) != 0;
+		else version(Windows) immutable landed = _setjmp(abortEscape.ptr, null) != 0;
+
+		// `__gshared` because a local's value across a `longjmp` is whatever the optimiser left in its register.
+		__gshared bool aborted;
+		aborted = true;
+		if (!landed) {
+			attempt();
+			aborted = false;
+		}
+
+		version(Posix) assert(core.sys.posix.signal.sigaction(core.sys.posix.signal.SIGABRT, &saved, null) == 0);
+		else version(Windows) cast(void) signal(windowsSigabrt, saved);
+		return aborted;
+	}
+}
+
 
 unittest { // a ration counts allocations, never frees, and ends with the allocator it replaced
 	static import fp.dynarray;
@@ -209,8 +349,7 @@ unittest { // a ration counts allocations, never frees, and ends with the alloca
 	fp.dynarray.free(b);
 }
 
-unittest { // temporary files are new, empty and distinct, inside a directory named without a trailing separator
-	static import fp.file;
+unittest { // temporary files are new, empty and distinct, inside a directory named without a trailing separator, and scratch files print into one
 	char* directory = temporaryDirectory();
 	assert(directory !is null);
 	scope(exit) fp.string.free(directory);
@@ -220,18 +359,33 @@ unittest { // temporary files are new, empty and distinct, inside a directory na
 	char* first = temporaryFile(), second = temporaryFile();
 	assert(first !is null && second !is null && !fp.string.equal(first, second));
 	assert(fp.string.slice(first)[0 .. fp.string.length(directory)] == fp.string.slice(directory));
-	auto empty = fp.file.readFile(fp.string.slice(first));
+	auto empty = fp.io.readFile(fp.string.slice(first));
 	assert(!empty.isNull && empty.get is null);
-	assert(fp.file.removeFile(fp.string.slice(first)) && fp.file.removeFile(fp.string.slice(second)));
+	assert(fp.io.removeFile(fp.string.slice(first)) && fp.io.removeFile(fp.string.slice(second)));
 	fp.string.free(first);
 	fp.string.free(second);
+
+	auto scratch = openScratchFile();
+	assert(!scratch.isNull);
+	char* scratchPath = fp.string.clone(scratch.get.path).get;
+	scope(exit) fp.string.free(scratchPath);
+	assert(fp.io.writeAll(scratch.get.descriptor, "printed"));
+	auto printed = fp.io.readFile(fp.string.slice(scratchPath));
+	assert(!printed.isNull && fp.string.equal(printed.get, "printed"));
+	fp.string.free(printed.get);
+	free(scratch.get);
+	assert(scratch.get.path is null && fp.io.readFile(fp.string.slice(scratchPath)).isNull);
+	auto refused = limitAllocations(0);
+	immutable refusedScratch = openScratchFile().isNull;
+	restoreAllocator(refused);
+	assert(refusedScratch);
 
 	for (size_t budget = 0;; ++budget) {
 		auto previous = limitAllocations(budget);
 		char* rationed = temporaryFile();
 		restoreAllocator(previous);
 		if (rationed is null) continue;
-		assert(fp.file.removeFile(fp.string.slice(rationed)));
+		assert(fp.io.removeFile(fp.string.slice(rationed)));
 		fp.string.free(rationed);
 		break;
 	}
@@ -245,7 +399,14 @@ unittest { // temporary files are new, empty and distinct, inside a directory na
 		scope(exit) fp.string.free(kept);
 		assert(saved is null || kept !is null);
 		assert(core.sys.posix.stdlib.setenv("TMPDIR", "/nonexistent-fp-directory", 1) == 0);
-		assert(temporaryFile() is null);
+		assert(temporaryFile() is null && openScratchFile().isNull);
 		assert((kept is null ? core.sys.posix.stdlib.unsetenv("TMPDIR") : core.sys.posix.stdlib.setenv("TMPDIR", kept, 1)) == 0);
 	}}
+}
+
+version(WASI) {} else unittest { // aborts are caught one after another, each putting the handler back, and an attempt that returns did not abort
+	static import fp.io;
+	assert(aborts(() { fp.io.abort("fp.testing: an expected abort\n"); }));
+	assert(aborts(() { fp.io.abort("fp.testing: another expected abort\n"); }));
+	assert(!aborts(() {}));
 }

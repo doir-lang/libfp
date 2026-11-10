@@ -12,7 +12,7 @@ private alias modules = imported!"std.meta".AliasSeq!(
 	"fp.string.ascii",
 	"fp.string.numbers",
 	"fp.string.utf",
-	"fp.file",
+	"fp.io",
 	"fp.rope",
 	"fp.testing",
 );

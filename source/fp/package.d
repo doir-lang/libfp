@@ -26,6 +26,6 @@ public import fp.string;
 public import fp.string.ascii;
 public import fp.string.numbers;
 public import fp.string.utf;
-public import fp.file;
+public import fp.io;
 public import fp.rope;
 public import fp.testing;
