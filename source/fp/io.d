@@ -1197,14 +1197,12 @@ unittest { // the console: printed values read back a line, word or token at a t
 
 	// `abort` writes every piece to standard error before it ends with `SIGABRT`, so point standard error at a scratch file while it runs.
 	version(Posix) static if (fp.testing.catchesAborts) {
-		static import core.sys.posix.unistd;
 		auto scratch = fp.testing.openScratchFile();
 		assert(!scratch.isNull);
 		scope(exit) fp.testing.free(scratch.get);
-		immutable savedError = core.sys.posix.unistd.dup(Console.error);
-		assert(savedError >= 0 && core.sys.posix.unistd.dup2(scratch.get.descriptor, Console.error) == Console.error);
+		auto redirected = fp.testing.redirect(Console.error, scratch.get.descriptor).get;
 		immutable aborted = fp.testing.aborts(() { abort("fp.io: ", -5, ' ', 7u, '\n'); });
-		assert(core.sys.posix.unistd.dup2(savedError, Console.error) == Console.error && core.sys.posix.unistd.close(savedError) == 0);
+		fp.testing.restore(redirected);
 		assert(aborted);
 		auto reported = readFile(fp.string.slice(scratch.get.path));
 		assert(!reported.isNull && fp.string.equal(reported.get, "fp.io: -5 7\n"));

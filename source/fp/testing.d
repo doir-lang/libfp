@@ -1,4 +1,4 @@
-/// Helpers for tests of code built on libfp: an allocator that refuses on demand, so every path that handles a refused allocation can be reached, and temporary files.
+/// Helpers for tests of code built on libfp: an allocator that refuses on demand, so every path that handles a refused allocation can be reached, temporary files, and redirecting a descriptor into one.
 ///
 /// Examples:
 /// ---
@@ -250,6 +250,77 @@ void free(ref ScratchFile scratch) @trusted {
 }
 
 
+version(Windows) private extern(C) {
+	int _dup(int descriptor);
+	int _dup2(int from, int to);
+	int _close(int descriptor);
+}
+
+/// A descriptor `redirect` pointed elsewhere, and a duplicate of where it pointed before, which `restore` puts back.
+struct Redirected {
+	int descriptor = -1; /// The descriptor redirected.
+	private int saved = -1;
+}
+
+/// Points the open descriptor `descriptor`, such as `fp.io.Console.error`, where the open descriptor `target` points, such as a `ScratchFile`'s, so a test can quiet or read back what a call writes there; `restore` puts it back.
+///
+/// Returns an empty `Nullable` if `descriptor` could not be duplicated or redirected, leaving it as it was, and always on WASI, which cannot renumber descriptors this way.
+///
+/// Examples:
+/// ---
+/// static import fp.io;
+/// static import fp.string;
+/// auto scratch = openScratchFile();
+/// scope(exit) free(scratch.get);
+/// version(WASI) {} else {
+/// 	auto redirected = redirect(fp.io.Console.error, scratch.get.descriptor).get;
+/// 	assert(fp.io.print(fp.io.Console.error, "quiet"));
+/// 	restore(redirected);
+/// 	auto written = fp.io.readFile(fp.string.slice(scratch.get.path)).get;
+/// 	scope(exit) fp.string.free(written);
+/// 	assert(fp.string.equal(written, "quiet"));
+/// }
+/// ---
+std.typecons.Nullable!Redirected redirect(int descriptor, int target) @trusted {
+	version(WASI) return typeof(return).init;
+	else {
+		version(Windows) {
+			immutable saved = _dup(descriptor);
+			immutable moved = saved >= 0 && _dup2(target, descriptor) == 0;
+		} else {
+			static import core.sys.posix.unistd;
+			immutable saved = core.sys.posix.unistd.dup(descriptor);
+			immutable moved = saved >= 0 && core.sys.posix.unistd.dup2(target, descriptor) == descriptor;
+		}
+		if (moved) return typeof(return)(Redirected(descriptor, saved));
+		if (saved >= 0) cast(void) fp.io.close(saved);
+		return typeof(return).init;
+	}
+}
+
+/// Points `redirected.descriptor` back where it pointed before `redirect`, closes the duplicate, and leaves `redirected` empty. It cannot fail.
+///
+/// Examples:
+/// ---
+/// static import fp.io;
+/// auto scratch = openScratchFile();
+/// scope(exit) free(scratch.get);
+/// auto redirected = redirect(fp.io.Console.output, scratch.get.descriptor);
+/// if (!redirected.isNull) restore(redirected.get);
+/// ---
+void restore(ref Redirected redirected) @trusted {
+	version(WASI) {} else {
+		version(Windows) cast(void) _dup2(redirected.saved, redirected.descriptor);
+		else {
+			static import core.sys.posix.unistd;
+			cast(void) core.sys.posix.unistd.dup2(redirected.saved, redirected.descriptor);
+		}
+		cast(void) fp.io.close(redirected.saved);
+	}
+	redirected = Redirected.init;
+}
+
+
 // --- catching abort ----------------------------------------------------------
 
 /// Whether `aborts` exists: on WASI `abort` traps, ending every thread, so nothing can catch it.
@@ -349,7 +420,7 @@ unittest { // a ration counts allocations, never frees, and ends with the alloca
 	fp.dynarray.free(b);
 }
 
-unittest { // temporary files are new, empty and distinct, inside a directory named without a trailing separator, and scratch files print into one
+unittest { // temporary files are new, empty and distinct, inside a directory named without a trailing separator, scratch files print into one, and a redirected descriptor writes there until restored
 	char* directory = temporaryDirectory();
 	assert(directory !is null);
 	scope(exit) fp.string.free(directory);
@@ -370,8 +441,23 @@ unittest { // temporary files are new, empty and distinct, inside a directory na
 	char* scratchPath = fp.string.clone(scratch.get.path).get;
 	scope(exit) fp.string.free(scratchPath);
 	assert(fp.io.writeAll(scratch.get.descriptor, "printed"));
+	// A descriptor redirected into the scratch file writes there until it is restored, and one that is not open cannot be redirected.
+	version(WASI) assert(redirect(fp.io.Console.error, scratch.get.descriptor).isNull);
+	else {
+		auto pipe = fp.io.createPipe().get;
+		auto redirected = redirect(pipe.writing, scratch.get.descriptor).get;
+		assert(redirected.descriptor == pipe.writing && fp.io.writeAll(pipe.writing, " twice"));
+		restore(redirected);
+		assert(redirected.descriptor == -1 && fp.io.writeAll(pipe.writing, "piped"));
+		char[5] piped;
+		assert(fp.io.readSome(pipe.reading, piped[]) == 5 && piped == "piped");
+		assert(fp.io.close(pipe.reading) && fp.io.close(pipe.writing));
+		assert(redirect(-1, scratch.get.descriptor).isNull && redirect(fp.io.Console.error, -1).isNull);
+	}
 	auto printed = fp.io.readFile(fp.string.slice(scratchPath));
-	assert(!printed.isNull && fp.string.equal(printed.get, "printed"));
+	version(WASI) immutable expected = "printed";
+	else immutable expected = "printed twice";
+	assert(!printed.isNull && fp.string.equal(printed.get, expected));
 	fp.string.free(printed.get);
 	free(scratch.get);
 	assert(scratch.get.path is null && fp.io.readFile(fp.string.slice(scratchPath)).isNull);
