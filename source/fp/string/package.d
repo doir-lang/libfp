@@ -65,6 +65,19 @@ auto slice(S)(S text) @trusted if (isStringLike!S) {
 	}
 }
 
+/// A D slice over the zero-terminated string `text`, up to its terminator, keeping its qualifier. Unlike `slice`, it never reads the bytes before `text` for an fp string's header, so it suits a C string whose start may be any byte of a larger buffer. Null gives null.
+///
+/// Examples:
+/// ---
+/// static immutable char[8] buffer = "ab\0cd\0\0\0";
+/// assert(sliceTerminated(buffer.ptr) == "ab");
+/// assert(sliceTerminated(buffer.ptr + 3) == "cd");
+/// assert(sliceTerminated(cast(const(char)*) null) is null);
+/// ---
+inout(char)[] sliceTerminated(inout(char)* text) @trusted {
+	return text is null ? null : text[0 .. core.stdc.string.strlen(text)];
+}
+
 
 unittest {
 	char[5] hello = "hello";
@@ -75,6 +88,12 @@ unittest {
 	static assert(is(typeof(slice("hello")) == string));
 	static assert(is(typeof(slice(hello[])) == char[]));
 	assert(slice(cast(const(char)*) null) is null && slice("C string".ptr) == "C string");
+
+	// An fp string's terminator follows its recorded length, so the two slices agree on it.
+	char* owned = clone("fp string").get;
+	scope(exit) free(owned);
+	assert(sliceTerminated(owned) == "fp string" && sliceTerminated(cast(char*) null) is null);
+	static assert(is(typeof(sliceTerminated(owned)) == char[]) && is(typeof(sliceTerminated("C".ptr)) == immutable(char)[]));
 }
 
 

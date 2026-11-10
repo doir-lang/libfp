@@ -6,7 +6,7 @@ Ported from an earlier C/C++ implementation (parallel C-macro and C++ template A
 
 ## Modules
 
-- `fp.pointer` — the fat pointer core: `allocate`/`resize`/`free`, stack allocation (`Array!(T, N)`, `allocateOnStack`), `valid`/`length`/`onStack`/etc., and `copy`, a slice copy that needs no druntime.
+- `fp.pointer` — the fat pointer core: `allocate`/`resize`/`free`, stack allocation (`Array!(T, N)`, `allocateOnStack`), `valid`/`length`/`onStack`/etc., and `copy` and `fill`, a slice copy and fill that need no druntime.
   Non-owning views are just native D slices (`pointer.slice(p)` or `p[a .. b]`) rather than a separate view type.
 - `fp.lifecycle` — how containers copy, move and end their elements: `isBitMoveable`, `moveInto`, `copyInto`, `swapInto`, `endLifetime`, composed field by field for a struct without hooks of its own; the `Owned` wrapper for a container that should free its fat pointer elements; and `equal`/`contentHash`, which use a type's own hooks or else its fields' bytes, padding ignored.
 - `fp.dynarray` — growable arrays on top of `fp.pointer` (`reserve`, `reserveAtLeast`, `pushBack`, `pushFront`, `insert`, `removeAt`, `removeRange`, `swapRemove`, `retain`, `unique`, `clone`, ...).
@@ -14,7 +14,7 @@ Ported from an earlier C/C++ implementation (parallel C-macro and C++ template A
   A plain struct with a runtime element size rather than a fat pointer.
 - `fp.algorithms` — hashing (`hashBytes`, MurmurHash3 and the hash table's default; `hashBytesFast`, FNV-1a; `combine`, for chaining a hash over several values), sorting and searching (`lowerBound`, `sortUnique`, an LSD `radixSort` for integer keys, `applyPermutation` through a caller's swap), and `commonSubsequence`, Myers' O(ND) diff in linear space with an edit budget.
 - `fp.hashtable` — a hopscotch-hashing open-addressing hash table on top of `fp.dynarray`.
-- `fp.string` — null-terminated dynamic strings on top of `fp.dynarray`: `append` of any mix of strings, characters and numbers, number formatting and parsing (`appendUnsigned`, `appendHex`, `appendFloat`, `parseUnsigned`, `parseFloat`), UTF-8 ⇄ UTF-32 conversion, UTF-16 lengths, and Unicode range tables.
+- `fp.string` — null-terminated dynamic strings on top of `fp.dynarray`: `append` of any mix of strings, characters and numbers, number formatting and parsing (`appendUnsigned`, `appendHex`, `appendFloat`, `parseUnsigned`, `parseFloat`), `sliceTerminated`, a C string's slice that never looks for an fp header, UTF-8 ⇄ UTF-32 conversion, UTF-16 lengths, and Unicode range tables.
 - `fp.file` — whole files: reading one into an `fp.string`, writing or appending to one (`writeFile`, with a `WriteMode`), and mapping one into memory, read-only or writable (`map`, `mapForWriting`); on WASI, which has no real mapping, a mapped file is read into memory instead.
 - `fp.rope` — text as a persistent rope: immutable versions sharing the leaves an edit leaves alone, with edits and line lookups in O(log n); a container of ropes shares and frees them itself.
 - `fp.testing` — helpers for tests of code built on libfp: `runTests`, the unittest runner every library in the stack uses under `-betterC`, and `limitAllocations`, an allocator that refuses after a given number of allocations.

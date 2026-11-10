@@ -553,6 +553,25 @@ void copy(T)(T[] destination, const(T)[] source) @trusted {
 	core.stdc.string.memmove(destination.ptr, source.ptr, T.sizeof * source.length);
 }
 
+/// Sets every element of `destination` to `value`, as C's `memset` does for bytes; like `copy`, it suits elements whose lifetime is their bytes and stands in for slice assignment under `-betterC`. View raw memory as `(cast(ubyte*) p)[0 .. bytes]` to clear it. It cannot fail.
+///
+/// Examples:
+/// ---
+/// ubyte[4] bytes = [1, 2, 3, 4];
+/// fill(bytes[1 .. 3], 0);
+/// assert(bytes == [1, 0, 0, 4]);
+/// long[3] numbers;
+/// fill(numbers[], -1);
+/// assert(numbers == [-1, -1, -1]);
+/// ---
+void fill(T)(T[] destination, const T value) @trusted {
+	static assert(fp.lifecycle.isBitMoveable!T, "fp.pointer.fill copies bytes; set " ~ T.stringof ~ " elements with fp.lifecycle.copyRange");
+	static if (T.sizeof == 1) {
+		static import core.stdc.string;
+		core.stdc.string.memset(destination.ptr, *cast(const(ubyte)*) &value, destination.length);
+	} else foreach (ref element; destination) element = value;
+}
+
 
 version(unittest) {
 	private __gshared int finalizeCount = 0;
@@ -678,4 +697,15 @@ unittest {
 	assert(cast(size_t) wideArray.ptr % Wide.alignof == 0 && cast(size_t) widerArray.ptr % Wider.alignof == 0);
 	assert(length(heap) == 300 && length(wides) == 3 && length(widerArray) == 3);
 	static assert(!__traits(compiles, allocate!Wider(1)));
+
+	// `fill` sets one-byte elements of any type, structs and empty slices, and refuses a type with a lifetime of its own.
+	char[3] letters = "abc";
+	fill(letters[0 .. 2], 'z');
+	fill(letters[3 .. 3], 'q');
+	assert(letters == "zzc");
+	Pair[2] filled;
+	fill(filled[], Pair(5, 6));
+	assert(filled[0] == Pair(5, 6) && filled[1] == Pair(5, 6));
+	Handle[1] owners;
+	static assert(__traits(compiles, fill(filled[], Pair.init)) && !__traits(compiles, fill(owners[], Handle.init)));
 }
