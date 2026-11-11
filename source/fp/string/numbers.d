@@ -1,4 +1,5 @@
-/// Numbers as text: writing integers in decimal or hexadecimal into a stack buffer or onto an fp string, writing a `double` in the shortest form that reads back as itself, and parsing integers and floating-point numbers. Nothing here depends on the C locale.
+/// Numbers as text: writing integers in decimal or hexadecimal into a stack buffer or onto an fp string, writing a `double` in the shortest form that reads back as itself, and parsing integers and floating-point numbers.
+/// Nothing here depends on the C locale.
 ///
 /// Examples:
 /// ---
@@ -36,7 +37,8 @@ enum size_t maxDecimalLength = 21;
 /// The most digits `formatHex` writes: sixteen, one for each four bits of a `ulong`.
 enum size_t maxHexLength = ulong.sizeof * 2;
 
-/// `value` written in decimal into the end of `buffer`, returned as the slice of `buffer` holding it, for callers that want the digits without an fp string. It cannot fail.
+/// `value` written in decimal into the end of `buffer`, returned as the slice of `buffer` holding it, for callers that want the digits without an fp string.
+/// It cannot fail.
 ///
 /// Examples:
 /// ---
@@ -46,13 +48,16 @@ enum size_t maxHexLength = ulong.sizeof * 2;
 const(char)[] formatUnsigned(ulong value, return ref char[maxDecimalLength] buffer) {
 	size_t at = buffer.length;
 	do {
+		assert(at > 0, "fp.string.numbers.formatUnsigned: more digits than maxDecimalLength");
 		buffer[--at] = cast(char)('0' + value % 10);
 		value /= 10;
 	} while (value != 0);
+	assert(at < buffer.length && (buffer[at] != '0' || at == buffer.length - 1), "fp.string.numbers.formatUnsigned: no digits, or a leading zero");
 	return buffer[at .. $];
 }
 
-/// `value` written in decimal, with a leading `-` when negative, into the end of `buffer`, returned as the slice of `buffer` holding it. It cannot fail.
+/// `value` written in decimal, with a leading `-` when negative, into the end of `buffer`, returned as the slice of `buffer` holding it.
+/// It cannot fail.
 ///
 /// Examples:
 /// ---
@@ -63,12 +68,15 @@ const(char)[] formatSigned(long value, return ref char[maxDecimalLength] buffer)
 	// Negated as unsigned, so `long.min`, whose magnitude no `long` holds, works too.
 	immutable magnitude = value < 0 ? 0UL - cast(ulong) value : cast(ulong) value;
 	immutable length = formatUnsigned(magnitude, buffer).length;
+	assert(length < buffer.length, "fp.string.numbers.formatSigned: no room for a sign");
 	if (value >= 0) return buffer[$ - length .. $];
 	buffer[$ - length - 1] = '-';
+	assert(fp.string.ascii.isDigit(buffer[$ - length]), "fp.string.numbers.formatSigned: a sign before no digits");
 	return buffer[$ - length - 1 .. $];
 }
 
-/// `value` written in lowercase hexadecimal, padded with zeros to at least `width` digits (at most `maxHexLength`), into the end of `buffer`, returned as the slice of `buffer` holding it. It cannot fail.
+/// `value` written in lowercase hexadecimal, padded with zeros to at least `width` digits (at most `maxHexLength`), into the end of `buffer`, returned as the slice of `buffer` holding it.
+/// It cannot fail.
 ///
 /// Examples:
 /// ---
@@ -80,10 +88,12 @@ const(char)[] formatHex(ulong value, return ref char[maxHexLength] buffer, size_
 	assert(width <= maxHexLength, "fp.string.numbers.formatHex: width past maxHexLength");
 	size_t at = buffer.length;
 	do {
+		assert(at > 0, "fp.string.numbers.formatHex: more digits than maxHexLength");
 		buffer[--at] = digitsOf[value & 0xF];
 		value >>= 4;
 	} while (value != 0);
 	while (buffer.length - at < width) buffer[--at] = '0';
+	assert(buffer.length - at >= width && buffer.length - at >= 1, "fp.string.numbers.formatHex: fewer digits than the width");
 	return buffer[at .. $];
 }
 
@@ -99,7 +109,8 @@ unittest {
 
 // === appending to an fp string =================================================
 
-/// Appends `value` in decimal to `text`, which may be null. Returns false if `text` could not grow, leaving it unchanged.
+/// Appends `value` in decimal to `text`, which may be null.
+/// Returns false if `text` could not grow, leaving it unchanged.
 ///
 /// Examples:
 /// ---
@@ -111,10 +122,13 @@ unittest {
 /// ---
 bool appendUnsigned(ref char* text, ulong value) {
 	char[maxDecimalLength] buffer;
-	return fp.string.concatenate(text, formatUnsigned(value, buffer));
+	auto digits = formatUnsigned(value, buffer);
+	assert(digits.length > 0 && digits.length <= maxDecimalLength - 1, "fp.string.numbers.appendUnsigned: a number of no digits or too many");
+	return fp.string.concatenate(text, digits);
 }
 
-/// Appends `value` in decimal, with a leading `-` when negative, to `text`, which may be null. Returns false if `text` could not grow, leaving it unchanged.
+/// Appends `value` in decimal, with a leading `-` when negative, to `text`, which may be null.
+/// Returns false if `text` could not grow, leaving it unchanged.
 ///
 /// Examples:
 /// ---
@@ -126,10 +140,13 @@ bool appendUnsigned(ref char* text, ulong value) {
 /// ---
 bool appendSigned(ref char* text, long value) {
 	char[maxDecimalLength] buffer;
-	return fp.string.concatenate(text, formatSigned(value, buffer));
+	auto digits = formatSigned(value, buffer);
+	assert(digits.length > 0 && (digits[0] == '-') == (value < 0), "fp.string.numbers.appendSigned: a sign that disagrees with the value");
+	return fp.string.concatenate(text, digits);
 }
 
-/// Appends `value` in lowercase hexadecimal to `text`, which may be null, padded with zeros to at least `width` digits (at most `maxHexLength`). Returns false if `text` could not grow, leaving it unchanged.
+/// Appends `value` in lowercase hexadecimal to `text`, which may be null, padded with zeros to at least `width` digits (at most `maxHexLength`).
+/// Returns false if `text` could not grow, leaving it unchanged.
 ///
 /// Examples:
 /// ---
@@ -140,11 +157,15 @@ bool appendSigned(ref char* text, long value) {
 /// assert(fp.string.equal(s, "00ab0"));
 /// ---
 bool appendHex(ref char* text, ulong value, size_t width = 0) {
+	assert(width <= maxHexLength, "fp.string.numbers.appendHex: width past maxHexLength");
 	char[maxHexLength] buffer;
-	return fp.string.concatenate(text, formatHex(value, buffer, width));
+	auto digits = formatHex(value, buffer, width);
+	assert(digits.length >= width && digits.length <= maxHexLength, "fp.string.numbers.appendHex: the wrong number of digits");
+	return fp.string.concatenate(text, digits);
 }
 
-/// Appends `value` to `text`, which may be null, in the shortest decimal form that reads back (through `parseFloat`) as the same `double`: `0.1`, `1e+300`, `inf`, `-inf` or `nan`. Returns false if `text` could not grow, leaving it unchanged.
+/// Appends `value` to `text`, which may be null, in the shortest decimal form that reads back (through `parseFloat`) as the same `double`: `0.1`, `1e+300`, `inf`, `-inf` or `nan`.
+/// Returns false if `text` could not grow, leaving it unchanged.
 ///
 /// Examples:
 /// ---
@@ -163,6 +184,8 @@ bool appendFloat(ref char* text, double value) @trusted {
 		if (n <= 0 || n >= buffer.length) return false;
 		if (value != value || core.stdc.stdlib.strtod(buffer.ptr, null) == value) break;
 	}
+	assert(n > 0 && n < buffer.length, "fp.string.numbers.appendFloat: a number of no characters or too many");
+	assert(value != value || core.stdc.stdlib.strtod(buffer.ptr, null) == value, "fp.string.numbers.appendFloat: 17 digits did not round-trip a double");
 	return fp.string.concatenate(text, buffer[0 .. n]);
 }
 
@@ -202,6 +225,7 @@ unittest { // every double reads back as itself; a refused growth leaves the tex
 uint hexDigitValue(char c) {
 	assert(fp.string.ascii.isHexDigit(c), "fp.string.numbers: hexDigitValue of a character that is not a hexadecimal digit");
 	if (fp.string.ascii.isDigit(c)) return c - '0';
+	assert((c | 0x20) >= 'a' && (c | 0x20) <= 'f', "fp.string.numbers: a hexadecimal letter past f");
 	return (c | 0x20) - 'a' + 10;
 }
 
@@ -210,7 +234,8 @@ struct Unsigned {
 	ulong value; /// The number.
 }
 
-/// Reads all of `digits`, every one a digit of `base` (2 to 16, in either case; 10 by default), as an unsigned number. Returns null if `digits` is empty, holds a character that is not a digit of `base`, such as a sign, or its value does not fit in a `ulong`.
+/// Reads all of `digits`, every one a digit of `base` (2 to 16, in either case; 10 by default), as an unsigned number.
+/// Returns null if `digits` is empty, holds a character that is not a digit of `base`, such as a sign, or its value does not fit in a `ulong`.
 ///
 /// Examples:
 /// ---
@@ -220,7 +245,7 @@ struct Unsigned {
 /// assert(parseUnsigned("12", 2).isNull && parseUnsigned("").isNull);
 /// ---
 std.typecons.Nullable!Unsigned parseUnsigned(const(char)[] digits, uint base = 10) {
-	assert(base >= 2 && base <= 16);
+	assert(base >= 2 && base <= 16, "fp.string.numbers.parseUnsigned: a base hexDigitValue cannot read");
 	if (digits.length == 0) return typeof(return).init;
 	ulong value = 0;
 	foreach (c; digits) {
@@ -231,6 +256,7 @@ std.typecons.Nullable!Unsigned parseUnsigned(const(char)[] digits, uint base = 1
 		value = core.checkedint.addu(core.checkedint.mulu(value, base, overflow), digit, overflow);
 		if (overflow) return typeof(return).init;
 	}
+	assert(digits.length > 1 || value < base, "fp.string.numbers.parseUnsigned: one digit read past its base");
 	return typeof(return)(Unsigned(value));
 }
 
@@ -239,7 +265,8 @@ struct Signed {
 	long value; /// The number.
 }
 
-/// Reads all of `text` as a signed number: an optional `+` or `-`, then digits of `base` as `parseUnsigned` reads them. Returns null if `text` is not entirely such a number or its value does not fit in a `long`.
+/// Reads all of `text` as a signed number: an optional `+` or `-`, then digits of `base` as `parseUnsigned` reads them.
+/// Returns null if `text` is not entirely such a number or its value does not fit in a `long`.
 ///
 /// Examples:
 /// ---
@@ -254,7 +281,9 @@ std.typecons.Nullable!Signed parseSigned(const(char)[] text, uint base = 10) {
 	if (magnitude.isNull) return typeof(return).init;
 	immutable limit = negative ? 0UL - cast(ulong) long.min : cast(ulong) long.max;
 	if (magnitude.get.value > limit) return typeof(return).init;
-	return typeof(return)(Signed(negative ? cast(long)(0UL - magnitude.get.value) : cast(long) magnitude.get.value));
+	immutable value = negative ? cast(long)(0UL - magnitude.get.value) : cast(long) magnitude.get.value;
+	assert(negative ? value <= 0 : value >= 0, "fp.string.numbers.parseSigned: a sign lost in the conversion");
+	return typeof(return)(Signed(value));
 }
 
 /// A parsed floating-point number, as `parseFloat` returns it.
@@ -262,7 +291,9 @@ struct Float {
 	double value; /// The number.
 }
 
-/// Reads all of `text` as a decimal or hexadecimal floating-point number, as C's `strtod` does in the "C" locale. Returns null if `text` is not entirely a number or a copy of a long `text` could not be allocated; a value too large rounds to an infinity, and one too small toward zero, as IEEE round-to-nearest does. The spellings `inf` and `nan` read as themselves.
+/// Reads all of `text` as a decimal or hexadecimal floating-point number, as C's `strtod` does in the "C" locale.
+/// Returns null if `text` is not entirely a number or a copy of a long `text` could not be allocated; a value too large rounds to an infinity, and one too small toward zero, as IEEE round-to-nearest does.
+/// The spellings `inf` and `nan` read as themselves.
 ///
 /// Examples:
 /// ---
@@ -285,8 +316,10 @@ std.typecons.Nullable!Float parseFloat(const(char)[] text) @trusted {
 		if (cloned.isNull) return typeof(return).init;
 		terminated = copy = cloned.get;
 	}
+	assert(terminated[text.length] == '\0', "fp.string.numbers.parseFloat: an unterminated copy for strtod");
 	char* end;
 	immutable value = core.stdc.stdlib.strtod(terminated, &end);
+	assert(end >= terminated && end <= terminated + text.length, "fp.string.numbers.parseFloat: strtod read past the text");
 	if (end != terminated + text.length) return typeof(return).init;
 	return typeof(return)(Float(value));
 }

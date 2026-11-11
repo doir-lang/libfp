@@ -1,6 +1,8 @@
-/// A growable array whose elements never move: storage is a table of fixed-size pages, so growing allocates a new page instead of reallocating the old ones. Use it where a pointer into the array must survive further appends, such as an arena read through references while more is added.
+/// A growable array whose elements never move: storage is a table of fixed-size pages, so growing allocates a new page instead of reallocating the old ones.
+/// Use it where a pointer into the array must survive further appends, such as an arena read through references while more is added.
 ///
-/// Unlike `fp.dynarray` this is a plain struct rather than a fat pointer: the elements are not contiguous, so there is no element pointer for a header to sit in front of. The element size is a runtime value so type-erased containers can use it; `PagedArrayOf!T`, which `create!T` returns, is the typed view.
+/// Unlike `fp.dynarray` this is a plain struct rather than a fat pointer: the elements are not contiguous, so there is no element pointer for a header to sit in front of.
+/// The element size is a runtime value so type-erased containers can use it; `PagedArrayOf!T`, which `create!T` returns, is the typed view.
 ///
 /// Examples:
 /// ---
@@ -28,7 +30,9 @@ enum size_t defaultPageBytes = 4096;
 
 private enum size_t swapScratchBytes = 64;
 
-/// Plain data with no methods: every operation is a free function, taking the array by `ref` when it changes it and by value when it only reads it. `free` is the only one that releases what it owns. Copying one copies a handle to the same pages, not the elements.
+/// Plain data with no methods: every operation is a free function, taking the array by `ref` when it changes it and by value when it only reads it.
+/// `free` is the only one that releases what it owns.
+/// Copying one copies a handle to the same pages, not the elements.
 ///
 /// Element lifetimes are ended by the `finalizer` the array stores, which `create!T` sets from the element type; an array made with `create(elementSize)` has none, so its elements are treated as bytes.
 ///
@@ -60,7 +64,10 @@ struct PagedArray {
 /// assert(pushBack(array, 1) && pushBack(array, 2));
 /// assert(length(array) == 2);
 /// ---
-size_t length(const PagedArray self) { return self.count; }
+size_t length(const PagedArray self) {
+	assert(self.count <= capacity(self), "fp.pagedarray: more elements than its pages hold");
+	return self.count;
+}
 
 /// Whether the array holds no elements.
 ///
@@ -72,7 +79,10 @@ size_t length(const PagedArray self) { return self.count; }
 /// assert(pushBack(array, 1));
 /// assert(!empty(array));
 /// ---
-bool empty(const PagedArray self) { return self.count == 0; }
+bool empty(const PagedArray self) {
+	assert(self.count <= capacity(self), "fp.pagedarray: more elements than its pages hold");
+	return self.count == 0;
+}
 
 /// The number of elements storable without allocating another page.
 ///
@@ -84,6 +94,8 @@ bool empty(const PagedArray self) { return self.count == 0; }
 /// assert(capacity(array) == 4);
 /// ---
 size_t capacity(const PagedArray self) @trusted {
+	assert(self.pageShift < size_t.sizeof * 8, "fp.pagedarray: a page too large to count");
+	assert(self.pages is null || fp.dynarray.valid(self.pages), "fp.pagedarray: a page table that is not a dynarray");
 	return fp.dynarray.length(cast(ubyte**) self.pages) << self.pageShift;
 }
 
@@ -94,7 +106,10 @@ size_t capacity(const PagedArray self) @trusted {
 /// PagedArrayOf!int array = create!int(16);
 /// assert(pageElements(array) == 4);
 /// ---
-size_t pageElements(const PagedArray self) { return size_t(1) << self.pageShift; }
+size_t pageElements(const PagedArray self) {
+	assert(self.pageShift < size_t.sizeof * 8, "fp.pagedarray: a page too large to count");
+	return size_t(1) << self.pageShift;
+}
 
 
 /// A pointer to element `i`, which must be less than the length, and stays valid until the element is popped or the array is freed or shrunk past it.
@@ -107,17 +122,21 @@ size_t pageElements(const PagedArray self) { return size_t(1) << self.pageShift;
 /// assert(*cast(int*) get(array, 0) == 7);
 /// ---
 void* get(ref PagedArray self, size_t i) @trusted {
-	assert(i < self.count);
+	assert(i < self.count, "fp.pagedarray: an index past the end");
+	assert((i >> self.pageShift) < fp.dynarray.length(self.pages), "fp.pagedarray: an element on a page that was never allocated");
 	return self.pages[i >> self.pageShift] + (i & (pageElements(self) - 1)) * self.elementSize;
 }
 /// Ditto
 const(void)* get(const PagedArray self, size_t i) @trusted {
-	assert(i < self.count);
+	assert(i < self.count, "fp.pagedarray: an index past the end");
+	assert((i >> self.pageShift) < fp.dynarray.length(self.pages), "fp.pagedarray: an element on a page that was never allocated");
 	return self.pages[i >> self.pageShift] + (i & (pageElements(self) - 1)) * self.elementSize;
 }
 
-// Ends the lifetimes of elements `start` .. `end`, which are spread over pages.
+// Ends the lifetimes of elements `start` ..
+// `end`, which are spread over pages.
 private void endLifetimes(ref PagedArray self, size_t start, size_t end) @trusted {
+	assert(start <= end && end <= self.count, "fp.pagedarray: ending lifetimes past the end");
 	if (self.finalizer is null) return;
 	for (size_t i = start; i < end; ++i) {
 		ubyte* slot = cast(ubyte*) get(self, i);
@@ -151,18 +170,22 @@ struct PagedArrayOf(T) {
 	/// assert(*p == 7);
 	/// ---
 	ref T opIndex(size_t i) @trusted {
-		assert(T.sizeof == base.elementSize);
+		assert(T.sizeof == base.elementSize, "fp.pagedarray: viewed as elements of the wrong size");
+		assert(i < base.count, "fp.pagedarray: an index past the end");
 		return *cast(T*) get(base, i);
 	}
 	/// Ditto
 	ref const(T) opIndex(size_t i) const @trusted {
-		assert(T.sizeof == base.elementSize);
+		assert(T.sizeof == base.elementSize, "fp.pagedarray: viewed as elements of the wrong size");
+		assert(i < base.count, "fp.pagedarray: an index past the end");
 		return *cast(const(T)*) get(base, i);
 	}
 }
 
 
-/// An empty array of `elementSize`-byte elements, `elementSize` greater than zero, or a `PagedArrayOf!T`. Pages hold a power-of-two number of elements, the fewest that fill at least `pageBytes`, so an index splits into page and offset by shift and mask. Nothing is allocated until the first element is added.
+/// An empty array of `elementSize`-byte elements, `elementSize` greater than zero, or a `PagedArrayOf!T`.
+/// Pages hold a power-of-two number of elements, the fewest that fill at least `pageBytes`, so an index splits into page and offset by shift and mask.
+/// Nothing is allocated until the first element is added.
 ///
 /// Examples:
 /// ---
@@ -175,13 +198,15 @@ struct PagedArrayOf(T) {
 /// free(ints);
 /// ---
 PagedArray create(size_t elementSize, size_t pageBytes = defaultPageBytes) {
-	assert(elementSize > 0);
+	assert(elementSize > 0, "fp.pagedarray: elements of no size");
+	assert(pageBytes > 0, "fp.pagedarray: pages of no size");
 	PagedArray self;
 	self.elementSize = elementSize;
 	while ((size_t(1) << self.pageShift) * elementSize < pageBytes) {
 		assert((size_t(1) << self.pageShift) <= size_t.max / elementSize / 2); // a page's byte size must fit in a size_t
 		++self.pageShift;
 	}
+	assert(pageElements(self) * elementSize >= pageBytes, "fp.pagedarray: a page smaller than asked for");
 	return self;
 }
 /// Ditto
@@ -189,10 +214,12 @@ PagedArrayOf!T create(T)(size_t pageBytes = defaultPageBytes) {
 	mixin fp.pointer.requireAlignable!T;
 	PagedArray self = create(T.sizeof, pageBytes);
 	self.finalizer = fp.lifecycle.finalizerOf!T();
+	assert(self.elementSize == T.sizeof && self.count == 0, "fp.pagedarray: a new array of the wrong shape");
 	return PagedArrayOf!T(self);
 }
 
-/// Releases every page and empties the array, ending the elements' lifetimes first if the array knows them. It stays usable: it can grow again, or be freed again harmlessly.
+/// Releases every page and empties the array, ending the elements' lifetimes first if the array knows them.
+/// It stays usable: it can grow again, or be freed again harmlessly.
 ///
 /// Examples:
 /// ---
@@ -202,15 +229,19 @@ PagedArrayOf!T create(T)(size_t pageBytes = defaultPageBytes) {
 /// assert(length(array) == 0 && capacity(array) == 0);
 /// ---
 void free(ref PagedArray self) @trusted {
+	assert(self.count <= capacity(self), "fp.pagedarray: more elements than its pages hold");
 	endLifetimes(self, 0, self.count);
 	foreach (i; 0 .. fp.dynarray.length(self.pages))
 		cast(void)fp.pointer.allocator(self.pages[i], 0);
 	fp.dynarray.free(self.pages);
 	self.count = 0;
+	assert(capacity(self) == 0, "fp.pagedarray: pages left after free");
 }
 
 
-/// Allocates pages until `n` elements fit. Returns false if the allocator refused; pages obtained before the refusal are kept as capacity. The page table grows first, so an `n` too large for any table fails before a page is allocated.
+/// Allocates pages until `n` elements fit.
+/// Returns false if the allocator refused; pages obtained before the refusal are kept as capacity.
+/// The page table grows first, so an `n` too large for any table fails before a page is allocated.
 ///
 /// Examples:
 /// ---
@@ -220,6 +251,7 @@ void free(ref PagedArray self) @trusted {
 /// assert(capacity(array) == 12 && length(array) == 0);
 /// ---
 bool reserve(ref PagedArray self, size_t n) @trusted {
+	assert(self.elementSize > 0, "fp.pagedarray: not an array; make one with create");
 	immutable pageBytes = pageElements(self) * self.elementSize;
 	immutable pagesNeeded = (n >> self.pageShift) + ((n & (pageElements(self) - 1)) != 0);
 	if (pagesNeeded > fp.dynarray.capacity(self.pages) && fp.dynarray.maybeGrow(self.pages, pagesNeeded, false, false) is null)
@@ -229,10 +261,14 @@ bool reserve(ref PagedArray self, size_t n) @trusted {
 		if (page is null) return false;
 		cast(void)fp.dynarray.pushBack(self.pages, page); // the table already has room
 	}
+	assert(capacity(self) >= n && capacity(self) - n < pageElements(self), "fp.pagedarray: reserved the wrong number of pages");
 	return true;
 }
 
-/// Appends `count` elements, which must be more than zero, and returns the first, or null (length unchanged) if the allocator refused or the length would overflow. The new elements are only contiguous within a page. When the array knows element lifetimes they start empty, as the convention requires; otherwise their bytes are whatever the page allocator handed back. The `T` version leaves them empty for a type whose lifetime is not its bytes.
+/// Appends `count` elements, which must be more than zero, and returns the first, or null (length unchanged) if the allocator refused or the length would overflow.
+/// The new elements are only contiguous within a page.
+/// When the array knows element lifetimes they start empty, as the convention requires; otherwise their bytes are whatever the page allocator handed back.
+/// The `T` version leaves them empty for a type whose lifetime is not its bytes.
 ///
 /// Examples:
 /// ---
@@ -244,7 +280,8 @@ bool reserve(ref PagedArray self, size_t n) @trusted {
 /// assert(grow(array) is &array[3]);
 /// ---
 void* grow(ref PagedArray self, size_t count = 1) {
-	assert(count > 0);
+	assert(count > 0, "fp.pagedarray: growing by nothing");
+	assert(self.elementSize > 0, "fp.pagedarray: not an array; make one with create");
 	// A partly filled last page is already allocated, so elements fitting in its rest skip `reserve` and its page-table read.
 	immutable offset = self.count & (pageElements(self) - 1);
 	if (offset == 0 || count > pageElements(self) - offset) {
@@ -253,6 +290,7 @@ void* grow(ref PagedArray self, size_t count = 1) {
 		if (overflow || !reserve(self, newCount)) return null;
 	}
 	self.count += count;
+	assert(self.count <= capacity(self), "fp.pagedarray: grew past its pages");
 	if (self.finalizer !is null) // these slots are now live, so they must read as empty rather than as the page's stale bytes
 		for (size_t i = self.count - count; i < self.count; ++i)
 			core.stdc.string.memset(cast(ubyte*) get(self, i), 0, self.elementSize);
@@ -260,16 +298,20 @@ void* grow(ref PagedArray self, size_t count = 1) {
 }
 /// Ditto, with `T.sizeof` required to equal the array's element size.
 T* grow(T)(ref PagedArray self, size_t count = 1) @trusted {
-	assert(T.sizeof == self.elementSize);
+	assert(T.sizeof == self.elementSize, "fp.pagedarray: grown as elements of the wrong size");
+	immutable before = self.count;
 	void* slot = grow(self, count);
 	if (slot is null) return null; // the array is unchanged, so the loop below would otherwise wipe live elements
 	static if (!fp.lifecycle.isBitMoveable!T) // the new elements are not contiguous, so they cannot be zeroed in one pass
 		for (size_t i = self.count - count; i < self.count; ++i)
 			fp.lifecycle.emptySlots(cast(T*) get(self, i), 1);
+	assert(self.count == before + count, "fp.pagedarray: grow added the wrong number of elements");
 	return cast(T*) slot;
 }
 
-/// Appends `value`, taking its lifetime over: the copy of it made for the call is left empty. `T.sizeof` must equal the array's element size. Returns false if the array could not grow, leaving it unchanged; the copy's lifetime is ended either way.
+/// Appends `value`, taking its lifetime over: the copy of it made for the call is left empty.
+/// `T.sizeof` must equal the array's element size.
+/// Returns false if the array could not grow, leaving it unchanged; the copy's lifetime is ended either way.
 ///
 /// Examples:
 /// ---
@@ -279,11 +321,17 @@ T* grow(T)(ref PagedArray self, size_t count = 1) @trusted {
 /// assert(array[0] == 1.5);
 /// ---
 bool pushBack(T)(ref PagedArray self, T value) @trusted {
-	assert(T.sizeof == self.elementSize);
+	assert(T.sizeof == self.elementSize, "fp.pagedarray: pushed an element of the wrong size");
+	immutable before = self.count;
 	void* slot = grow(self, 1);
-	if (slot is null) { fp.lifecycle.endLifetime(value); return false; }
+	if (slot is null) {
+		assert(self.count == before, "fp.pagedarray: a refused pushBack changed the length");
+		fp.lifecycle.endLifetime(value);
+		return false;
+	}
 	fp.lifecycle.emptySlots(cast(T*) slot, 1);
 	fp.lifecycle.moveInto(*cast(T*) slot, value);
+	assert(self.count == before + 1 && slot is get(self, before), "fp.pagedarray: pushBack did not append one element");
 	return true;
 }
 
@@ -301,9 +349,11 @@ bool pushBack(T)(ref PagedArray self, T value) @trusted {
 /// assert(length(array) == 1);
 /// ---
 void removeLast(ref PagedArray self, size_t count = 1) {
-	assert(count <= self.count);
+	assert(count <= self.count, "fp.pagedarray: removing more elements than there are");
+	immutable before = self.count;
 	endLifetimes(self, self.count - count, self.count);
 	self.count -= count;
+	assert(self.count == before - count, "fp.pagedarray: removeLast set the wrong length");
 }
 
 /// Sets the length to 0 without releasing any page (see `shrinkToFit`), ending the elements' lifetimes.
@@ -317,11 +367,15 @@ void removeLast(ref PagedArray self, size_t count = 1) {
 /// assert(empty(array) && capacity(array) == 8);
 /// ---
 void clear(ref PagedArray self) {
+	immutable pages = capacity(self);
 	endLifetimes(self, 0, self.count);
 	self.count = 0;
+	assert(capacity(self) == pages, "fp.pagedarray: clear changed the pages");
 }
 
-/// Frees every page past the one holding the last element, so `capacity` drops to the fewest whole pages `length` needs; after `clear` it frees them all. The elements that remain do not move. The page table shrinks to match where the allocator allows; if it refuses, the table only keeps its spare slots, so this cannot fail.
+/// Frees every page past the one holding the last element, so `capacity` drops to the fewest whole pages `length` needs; after `clear` it frees them all.
+/// The elements that remain do not move.
+/// The page table shrinks to match where the allocator allows; if it refuses, the table only keeps its spare slots, so this cannot fail.
 ///
 /// Examples:
 /// ---
@@ -335,6 +389,7 @@ void clear(ref PagedArray self) {
 void shrinkToFit(ref PagedArray self) @trusted {
 	immutable needed = (self.count + pageElements(self) - 1) >> self.pageShift;
 	immutable have = fp.dynarray.length(self.pages);
+	assert(needed <= have, "fp.pagedarray: more elements than its pages hold");
 	foreach (i; needed .. have)
 		cast(void)fp.pointer.allocator(self.pages[i], 0);
 	if (needed == 0) {
@@ -344,10 +399,12 @@ void shrinkToFit(ref PagedArray self) @trusted {
 	cast(void)fp.dynarray.removeLast(self.pages, have - needed);
 	if (fp.dynarray.capacity(self.pages) > needed)
 		cast(void)fp.dynarray.shrinkToFit(self.pages);
+	assert(fp.dynarray.length(self.pages) == needed && self.count <= capacity(self), "fp.pagedarray: shrinkToFit kept the wrong pages");
 }
 
 
-/// Swaps two elements' bytes, which exchanges their lifetimes too since both are live. Goes through a small stack buffer, so it never allocates and cannot fail, whatever the element size.
+/// Swaps two elements' bytes, which exchanges their lifetimes too since both are live.
+/// Goes through a small stack buffer, so it never allocates and cannot fail, whatever the element size.
 ///
 /// Examples:
 /// ---
@@ -358,6 +415,7 @@ void shrinkToFit(ref PagedArray self) @trusted {
 /// assert(array[0] == 2 && array[1] == 1);
 /// ---
 void swap(ref PagedArray self, size_t a, size_t b) @trusted {
+	assert(a < self.count && b < self.count, "fp.pagedarray: swapping past the end");
 	if (a == b) return;
 	ubyte* pa = cast(ubyte*) get(self, a);
 	ubyte* pb = cast(ubyte*) get(self, b);

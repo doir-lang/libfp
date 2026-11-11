@@ -1,4 +1,5 @@
-/// libfp: fat pointers and the containers built on them, for `-betterC` D. `import fp;` pulls in every module; each can also be imported on its own. Several modules define the same names — `append`, `capacity`, `clear`, `clone`, `concatenate`, `contains`, `create`, `empty`, `find`, `free`, `grow`, `insert`, `length`, `lineBreakCount`, `lineOf`, `lineStart`, `removeLast`, `pushBack`, `reserve`, `shrinkToFit`, `valid` — so an unqualified call to one of them is ambiguous and must be qualified with its module.
+/// libfp: fat pointers and the containers built on them, for `-betterC` D. `import fp;` pulls in every module; each can also be imported on its own.
+/// Several modules define the same names — `append`, `capacity`, `clear`, `clone`, `concatenate`, `contains`, `create`, `empty`, `find`, `free`, `grow`, `insert`, `length`, `lineBreakCount`, `lineOf`, `lineStart`, `removeLast`, `pushBack`, `reserve`, `shrinkToFit`, `valid` — so an unqualified call to one of them is ambiguous and must be qualified with its module.
 ///
 /// Examples:
 /// ---

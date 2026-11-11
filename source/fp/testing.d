@@ -24,7 +24,10 @@ static import fp.string.utf;
 
 // --- running tests ---------------------------------------------------------------
 
-/// Runs every unittest of each module named in `modules`, in order, printing each module's name and test count and each test's index to stderr as it goes, then `<project>: all N tests passed.` to stdout. A failing test aborts through its assert. Returns how many tests ran. It is outside this module's `@nogc nothrow` label, so it runs tests with any attributes.
+/// Runs every unittest of each module named in `modules`, in order, printing each module's name and test count and each test's index to stderr as it goes, then `<project>: all N tests passed.` to stdout.
+/// A failing test aborts through its assert.
+/// Returns how many tests ran.
+/// It is outside this module's `@nogc nothrow` label, so it runs tests with any attributes.
 ///
 /// Examples:
 /// ---
@@ -60,6 +63,7 @@ private __gshared fp.pointer.Allocator rationedUnderlying;
 private __gshared size_t rationedRemaining;
 
 private void* rationedAllocator(void* p, size_t size) {
+	assert(rationedUnderlying !is null && rationedUnderlying !is &rationedAllocator, "fp.testing: a rationed allocator with nothing, or itself, underneath");
 	// Frees are always forwarded, or a test could not clean up after itself.
 	if (size == 0) return rationedUnderlying(p, 0);
 	if (rationedRemaining == 0) return null;
@@ -67,7 +71,8 @@ private void* rationedAllocator(void* p, size_t size) {
 	return rationedUnderlying(p, size);
 }
 
-/// Makes `fp.pointer.allocator` grant only the next `n` allocations and refuse the rest, while still freeing, and returns the allocator it replaced; pass that to `restoreAllocator` to restore it. It is one global for every thread, so tests using it must not run concurrently with anything that allocates.
+/// Makes `fp.pointer.allocator` grant only the next `n` allocations and refuse the rest, while still freeing, and returns the allocator it replaced; pass that to `restoreAllocator` to restore it.
+/// It is one global for every thread, so tests using it must not run concurrently with anything that allocates.
 ///
 /// Examples:
 /// ---
@@ -80,6 +85,8 @@ private void* rationedAllocator(void* p, size_t size) {
 /// ---
 fp.pointer.Allocator limitAllocations(size_t n = 0) {
 	fp.pointer.Allocator previous = fp.pointer.allocator;
+	assert(previous !is &rationedAllocator, "fp.testing.limitAllocations: already limited; restoreAllocator first");
+	assert(previous !is null, "fp.testing.limitAllocations: no allocator to ration");
 	rationedUnderlying = previous;
 	rationedRemaining = n;
 	fp.pointer.allocator = &rationedAllocator;
@@ -96,6 +103,8 @@ fp.pointer.Allocator limitAllocations(size_t n = 0) {
 /// assert(fp.pointer.allocator is previous);
 /// ---
 void restoreAllocator(fp.pointer.Allocator previous) {
+	assert(previous !is null, "fp.testing.restoreAllocator: restoring no allocator");
+	assert(previous !is &rationedAllocator, "fp.testing.restoreAllocator: restoring the rationed allocator itself");
 	fp.pointer.allocator = previous;
 }
 
@@ -133,13 +142,15 @@ char* temporaryDirectory() @trusted {
 			const(char)[] path = variable is null || *variable == 0 ? "/tmp" : variable[0 .. core.stdc.string.strlen(variable)];
 		}
 		while (path.length > 1 && path[$ - 1] == '/') path = path[0 .. $ - 1];
+		assert(path.length > 0 && (path.length == 1 || path[$ - 1] != '/'), "fp.testing.temporaryDirectory: a path ending in a separator");
 		return fp.string.clone(path).get(null);
 	}
 }
 
 version(WASI) private __gshared size_t temporaryFiles;
 
-/// Creates an empty file with a name no other file has in `temporaryDirectory`, and returns its path as a new fp string. The caller removes the file, as with `fp.io.removeFile`, and frees the path.
+/// Creates an empty file with a name no other file has in `temporaryDirectory`, and returns its path as a new fp string.
+/// The caller removes the file, as with `fp.io.removeFile`, and frees the path.
 ///
 /// Returns null if the file cannot be created or an allocation is refused, leaving no file behind.
 ///
@@ -196,6 +207,7 @@ char* temporaryFile() @trusted {
 			return null;
 		}
 		cast(void) core.sys.posix.unistd.close(descriptor);
+		assert(!fp.string.endsWith(path, "XXXXXX"), "fp.testing.temporaryFile: mkstemp left the template unfilled");
 		return path;
 	}
 }
@@ -230,10 +242,12 @@ std.typecons.Nullable!ScratchFile openScratchFile() @trusted {
 		return typeof(return).init;
 	}
 	scratch.descriptor = core.stdc.stdio.fileno(scratch.file);
+	assert(scratch.descriptor >= 0, "fp.testing.openScratchFile: an open file with no descriptor");
 	return typeof(return)(scratch);
 }
 
-/// Closes and removes the file `scratch` names, and frees its path, leaving `scratch` empty. It cannot fail.
+/// Closes and removes the file `scratch` names, and frees its path, leaving `scratch` empty.
+/// It cannot fail.
 ///
 /// Examples:
 /// ---
@@ -243,6 +257,7 @@ std.typecons.Nullable!ScratchFile openScratchFile() @trusted {
 /// assert(scratch.get.path is null);
 /// ---
 void free(ref ScratchFile scratch) @trusted {
+	assert(scratch.file !is null && scratch.path !is null, "fp.testing.free: a scratch file openScratchFile did not make");
 	cast(void) core.stdc.stdio.fclose(scratch.file);
 	cast(void) fp.io.removeFile(fp.string.slice(scratch.path));
 	fp.string.free(scratch.path);
@@ -292,13 +307,15 @@ std.typecons.Nullable!Redirected redirect(int descriptor, int target) @trusted {
 			immutable saved = core.sys.posix.unistd.dup(descriptor);
 			immutable moved = saved >= 0 && core.sys.posix.unistd.dup2(target, descriptor) == descriptor;
 		}
+		assert(!moved || saved != descriptor, "fp.testing.redirect: the saved copy is the descriptor itself");
 		if (moved) return typeof(return)(Redirected(descriptor, saved));
 		if (saved >= 0) cast(void) fp.io.close(saved);
 		return typeof(return).init;
 	}
 }
 
-/// Points `redirected.descriptor` back where it pointed before `redirect`, closes the duplicate, and leaves `redirected` empty. It cannot fail.
+/// Points `redirected.descriptor` back where it pointed before `redirect`, closes the duplicate, and leaves `redirected` empty.
+/// It cannot fail.
 ///
 /// Examples:
 /// ---
@@ -309,6 +326,7 @@ std.typecons.Nullable!Redirected redirect(int descriptor, int target) @trusted {
 /// if (!redirected.isNull) restore(redirected.get);
 /// ---
 void restore(ref Redirected redirected) @trusted {
+	assert(redirected.descriptor >= 0 && redirected.saved >= 0, "fp.testing.restore: restoring a redirection redirect did not make");
 	version(WASI) {} else {
 		version(Windows) cast(void) _dup2(redirected.saved, redirected.descriptor);
 		else {
@@ -351,7 +369,8 @@ version(WASI) {} else version(Posix) {
 	private extern(C) int _setjmp(void* buffer, void* frame);
 	private extern(C) void longjmp(void* buffer, int value);
 
-	// `core.stdc.signal` declares `signal` without `@nogc nothrow`, so bind it here. `SIGABRT` is 22 on Windows.
+	// `core.stdc.signal` declares `signal` without `@nogc nothrow`, so bind it here.
+	// `SIGABRT` is 22 on Windows.
 	private alias AbortHandler = extern(C) void function(int) @nogc nothrow;
 	private extern(C) AbortHandler signal(int sig, AbortHandler handler);
 	private enum int windowsSigabrt = 22;
@@ -368,7 +387,10 @@ version(WASI) {} else {
 		else version(Windows) longjmp(abortEscape.ptr, 1);
 	}
 
-	/// Runs `attempt` and reports whether it called C's `abort`, as `fp.io.abort` does, by catching its `SIGABRT` and jumping back out of the handler. An abort abandons `attempt` where it stood: its `scope(exit)` blocks do not run and what it allocated leaks, so keep it small. It cannot fail; it asserts if the handler cannot be installed. It exists only where `catchesAborts` is true.
+	/// Runs `attempt` and reports whether it called C's `abort`, as `fp.io.abort` does, by catching its `SIGABRT` and jumping back out of the handler.
+	/// An abort abandons `attempt` where it stood: its `scope(exit)` blocks do not run and what it allocated leaks, so keep it small.
+	/// It cannot fail; it asserts if the handler cannot be installed.
+	/// It exists only where `catchesAborts` is true.
 	///
 	/// Examples:
 	/// ---
@@ -420,7 +442,7 @@ unittest { // a ration counts allocations, never frees, and ends with the alloca
 	fp.dynarray.free(b);
 }
 
-unittest { // temporary files are new, empty and distinct, inside a directory named without a trailing separator, scratch files print into one, and a redirected descriptor writes there until restored
+unittest { // temporary files are new, empty and distinct, inside a directory without a trailing separator; scratch files print into one, and redirected descriptors restore
 	char* directory = temporaryDirectory();
 	assert(directory !is null);
 	scope(exit) fp.string.free(directory);

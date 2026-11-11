@@ -7,7 +7,8 @@
   Do not restate what the code already says.
 - Cap every free-standing comment (a `//` or `/* */` block that is not a documentation comment) at 25 words.
   If it needs more, the code or its documentation should carry the explanation instead.
-- Editors here soft-wrap, so write each comment, and each paragraph of a DDoc comment, on a single line rather than hard-wrapping it at a column.
+- Put each sentence of every comment (free-standing, DDoc, docstring or DOIR documentation) on its own line, with a blank line between paragraphs; never hard-wrap a sentence, since editors here soft-wrap.
+  `tools/lint.py` reports a D comment that breaks this as `CMT-Sentence` or `CMT-Wrap`.
 - Do not leave commented-out code, change logs, or notes about what was changed in a comment; those belong in commit messages.
 
 ## Documentation
@@ -40,7 +41,7 @@
 ## Style
 
 - Prefer plain-data structs operated on by free functions that take them by `ref` (for example `pushBack(array, x)`, `free(array)`), rather than methods.
-  Use member functions only for operator overloads, for `@property` accessors that name part of a field (such as `ecrs.relation.Relates` naming a slot of `related`), and for what a language protocol requires to be a member, such as range primitives (`empty`, `front`, `popFront`) or an `alias this` target.
+  Use member functions only for operator overloads, for `@property` accessors that name part of a field, and for what a language protocol requires to be a member, such as range primitives (`empty`, `front`, `popFront`) or an `alias this` target.
   Python is not ported, so it uses classes and methods where they are idiomatic.
 - Prefer fully qualified names to aliasing imports: call `fp.string.free(s)` rather than `import fp.string : stringFree = free;` or `alias stringFree = fp.string.free;`.
   A `static import` keeps a module's names out of scope so every use has to be qualified.
@@ -75,6 +76,15 @@
 - Return `std.typecons.Nullable` only of a struct or a pointer, never of a slice or other non-aggregate value.
   Such a `Nullable` gets a `toHash` that needs druntime's hashing, which `-betterC` does not link, and MSVC's linker fails on it even when nothing calls it; wrap a slice in a struct instead.
 - When a limit on one value follows from another (such as a bit position), name the constant once, derive the others from it, and `assert` the limit where the value is accepted.
+- Give every recursion, and every loop over input, a named bound, and `assert` it where the depth or count grows.
+  A function that calls itself carries `// bounded: <the bound>` on the line above its documentation comment; prefer a worklist where it is no longer than the recursion.
+  `tools/lint.py` reports one without it as `REC-Bound`.
+- Input from outside the program (source text, bytes off a network, a document, a program to run) meets a named limit and a reported failure, never a stack overflow or a hang.
+- Assert what each function relies on: its arguments' preconditions, a structure's invariants where it is written and again where it is read, and what must never happen.
+  A structure with invariants gets a `validate` function that checks all of them, and the module asserts it on what it builds, so it runs wherever asserts do: debug and test builds, not release.
+  `python3 tools/lint.py --report` prints each module's asserts per function.
+- A structure with state, or a function over input, has a seeded test: a random sequence of operations checked against a simple model or a second implementation, with allocations refused at random (`fp.testing.limitAllocations`).
+  It draws from `fp.algorithms.Random`, so a failure replays from its seed, and a refused call must leave its arguments as they were.
 - Put test-only code, such as helper functions and globals the tests use, inside `version(unittest)` in D, and in the test files rather than the modules they test in Python.
 - `tests/runner.d` runs only the modules it lists, so add a new module with unittests to its `modules` list.
 - Keep test coverage as close to 100% as possible: add a test for every new branch and failure path, and check with `python3 tools/coverage.py`; an uncovered line needs a reason, such as being unreachable or platform-specific.
@@ -85,6 +95,9 @@
 - Whenever possible, define a function before anything that uses it, so a module reads bottom-up from its building blocks; a Python tool ends with `main`.
   When functions use each other in a cycle, define first the one that more of the module uses.
 - Keep a module's tests in the same order as the code they test.
+- Keep a function's body to 70 lines.
+  When one grows past that, let it decide the cases and move each straight-line part into a helper defined above it, so the branches sit in the caller and the loops in the helpers.
+  `tools/lint.py` reports a longer one as `FN-Length`.
 - Prefer merging a new test case into an existing test (a D `unittest` block, a Python test function) covering the same section over adding a new one; add one only when no existing test fits.
 
 ## Markdown

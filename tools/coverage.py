@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Measures per-module unit test coverage. -cov needs druntime, so this builds the same tests as plain D rather than -betterC.
+"""Measures per-module unit test coverage.
+-cov needs druntime, so this builds the same tests as plain D rather than -betterC.
 
 Usage: tools/coverage.py [-v]    (-v lists the uncovered lines; set DC to use a compiler other than ldc2)
 """
@@ -55,7 +56,8 @@ def build_and_run():
 	if subprocess.run(command, cwd=root).returncode != 0:
 		sys.exit(1)
 
-	# --DRT-testmode lets druntime reach main. Run from the root: -cov reopens sources by their relative paths; `dstpath` puts listings in `bin/`.
+	# --DRT-testmode lets druntime reach main.
+	# Run from the root: -cov reopens sources by their relative paths; `dstpath` puts listings in `bin/`.
 	run = subprocess.run([os.path.join(root, exe), '--DRT-testmode=run-main', '--DRT-covopt=dstpath:' + out + ' merge:0'],
 		cwd=root, capture_output=True, text=True)
 	with open(os.path.join(root, out, 'run.log'), 'w') as log:

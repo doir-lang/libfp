@@ -36,7 +36,8 @@ enum EncodeError : ubyte {
 	allocationRefused, /// Encodable, but the string could not grow to hold it.
 }
 
-/// Encodes `codepoint` into the start of `out_`. Returns the number of bytes written, or 0 with `error` saying why.
+/// Encodes `codepoint` into the start of `out_`.
+/// Returns the number of bytes written, or 0 with `error` saying why.
 ///
 /// Examples:
 /// ---
@@ -57,6 +58,7 @@ size_t encode(uint codepoint, ref char[4] out_, out EncodeError error) {
 		return 0;
 	}
 
+	error = EncodeError.none;
 	if (codepoint <= 0x7F) {
 		out_[0] = cast(char) codepoint;
 		return 1;
@@ -74,15 +76,21 @@ size_t encode(uint codepoint, ref char[4] out_, out EncodeError error) {
 	out_[1] = cast(char)(0x80 | ((codepoint >> 12) & 0x3F));
 	out_[2] = cast(char)(0x80 | ((codepoint >> 6) & 0x3F));
 	out_[3] = cast(char)(0x80 | (codepoint & 0x3F));
+	assert(codepoint >= 0x10000 && sequenceLength(out_[0]) == 4, "fp.string.utf.encode: a four-byte sequence its lead does not announce");
+	assert(error == EncodeError.none, "fp.string.utf.encode: an error set on a codepoint that encoded");
 	return 4;
 }
 /// Ditto
 size_t encode(uint codepoint, ref char[4] out_) {
 	EncodeError ignored;
-	return encode(codepoint, out_, ignored);
+	immutable n = encode(codepoint, out_, ignored);
+	assert((n == 0) == (ignored != EncodeError.none), "fp.string.utf.encode: an error and a length that disagree");
+	assert(n == 0 || sequenceLength(out_[0]) == n, "fp.string.utf.encode: a sequence its lead does not announce");
+	return n;
 }
 
-/// Encodes `codepoint` as UTF-8 and appends it to `text`, which may be null. Returns `EncodeError.none`, or why nothing was appended: `EncodeError.outOfRange` or `EncodeError.surrogate` for an unencodable value, `EncodeError.allocationRefused` when `text` cannot grow, which includes a pointer that is not an fp string.
+/// Encodes `codepoint` as UTF-8 and appends it to `text`, which may be null.
+/// Returns `EncodeError.none`, or why nothing was appended: `EncodeError.outOfRange` or `EncodeError.surrogate` for an unencodable value, `EncodeError.allocationRefused` when `text` cannot grow, which includes a pointer that is not an fp string.
 ///
 /// Examples:
 /// ---
@@ -96,8 +104,11 @@ size_t encode(uint codepoint, ref char[4] out_) {
 EncodeError append(ref char* text, uint codepoint) {
 	char[4] encoded;
 	EncodeError error;
+	immutable before = fp.string.length(text);
 	immutable n = encode(codepoint, encoded, error);
+	assert(n <= encoded.length && (n == 0) == (error != EncodeError.none), "fp.string.utf.append: an error and a length that disagree");
 	if (n > 0 && !fp.string.concatenate(text, encoded[0 .. n])) return EncodeError.allocationRefused;
+	assert(fp.string.length(text) == before + n, "fp.string.utf.append: appended the wrong number of bytes");
 	return error;
 }
 
@@ -135,7 +146,8 @@ unittest {
 
 /// Decodes the codepoint starting at `text[at]`, advancing `at` past it.
 ///
-/// Safe on arbitrary bytes: continuation bytes are bounds-checked before they are read. A sequence that is truncated, lacks a continuation byte, is overlong, or encodes a surrogate or a value above U+10FFFF clears `valid`, decodes as its lead byte and consumes one byte, so a caller ignoring `valid` still makes progress.
+/// Safe on arbitrary bytes: continuation bytes are bounds-checked before they are read.
+/// A sequence that is truncated, lacks a continuation byte, is overlong, or encodes a surrogate or a value above U+10FFFF clears `valid`, decodes as its lead byte and consumes one byte, so a caller ignoring `valid` still makes progress.
 ///
 /// Examples:
 /// ---
@@ -148,6 +160,7 @@ unittest {
 /// assert(decode("\xE2", other, valid) == 0xE2 && !valid && other == 1);
 /// ---
 uint decode(const(char)[] text, ref size_t at, out bool valid) {
+	assert(at < text.length, "fp.string.utf.decode: offset out of bounds");
 	immutable c = cast(ubyte) text[at];
 	if (c < 0x80) {
 		valid = true;
@@ -178,15 +191,21 @@ uint decode(const(char)[] text, ref size_t at, out bool valid) {
 		return c;
 	}
 	at += n;
+	assert(at <= text.length, "fp.string.utf.decode: read past the text");
+	assert(codepoint >= least && codepoint <= 0x10FFFF, "fp.string.utf.decode: a valid sequence decoded outside its range");
 	return codepoint;
 }
 /// Ditto
 uint decode(const(char)[] text, ref size_t at) {
 	bool ignored;
-	return decode(text, at, ignored);
+	immutable start = at;
+	immutable codepoint = decode(text, at, ignored);
+	assert(at > start && at <= text.length && at - start <= 4, "fp.string.utf.decode: did not advance by one sequence");
+	return codepoint;
 }
 
-/// The length in bytes of the UTF-8 sequence lead byte `lead` starts: 1 for ASCII, and for a continuation byte or a byte no sequence starts, so a scan stepping by it always advances. It does not check the bytes that follow.
+/// The length in bytes of the UTF-8 sequence lead byte `lead` starts: 1 for ASCII, and for a continuation byte or a byte no sequence starts, so a scan stepping by it always advances.
+/// It does not check the bytes that follow.
 ///
 /// Examples:
 /// ---
@@ -218,7 +237,9 @@ size_t firstInvalid(S)(S text) if (fp.string.isStringLike!S) {
 		bool valid;
 		cast(void) decode(view, at, valid);
 		if (!valid) return start;
+		assert(at > start, "fp.string.utf.firstInvalid: decode did not advance");
 	}
+	assert(at == view.length, "fp.string.utf.firstInvalid: read past the text");
 	return fp.pointer.notFound;
 }
 
@@ -232,6 +253,8 @@ size_t codepointCount(S)(S text) if (fp.string.isStringLike!S) {
 	const(char)[] view = fp.string.slice(text);
 	size_t count = 0;
 	for (size_t at = 0; at < view.length; ++count) cast(void) decode(view, at);
+	assert(count <= view.length, "fp.string.utf.codepointCount: more codepoints than bytes");
+	assert(count * 4 >= view.length, "fp.string.utf.codepointCount: a codepoint longer than four bytes");
 	return count;
 }
 
@@ -247,7 +270,8 @@ size_t utf16Units(char c) {
 	return sequenceLength(c) == 4 ? 2 : 1;
 }
 
-/// The number of UTF-16 code units well-formed UTF-8 `text` takes, as editors that count in UTF-16 need: two for a codepoint above U+FFFF, which UTF-16 writes as a surrogate pair, one for any other. It counts by lead bytes, so it is defined on any text but meaningful only on valid UTF-8.
+/// The number of UTF-16 code units well-formed UTF-8 `text` takes, as editors that count in UTF-16 need: two for a codepoint above U+FFFF, which UTF-16 writes as a surrogate pair, one for any other.
+/// It counts by lead bytes, so it is defined on any text but meaningful only on valid UTF-8.
 ///
 /// Examples:
 /// ---
@@ -256,10 +280,12 @@ size_t utf16Units(char c) {
 size_t utf16Length(S)(S text) if (fp.string.isStringLike!S) {
 	size_t units = 0;
 	foreach (c; fp.string.slice(text)) units += utf16Units(c);
+	assert(units <= fp.string.length(text), "fp.string.utf.utf16Length: more units than bytes");
 	return units;
 }
 
-/// Whether `codepoint` lies in one of the inclusive ranges of `table`, which must be sorted and must not overlap, as the Unicode property tables a lexer or renderer generates are. A binary search: O(log n).
+/// Whether `codepoint` lies in one of the inclusive ranges of `table`, which must be sorted and must not overlap, as the Unicode property tables a lexer or renderer generates are.
+/// A binary search: O(log n).
 ///
 /// Examples:
 /// ---
@@ -269,6 +295,8 @@ size_t utf16Length(S)(S text) if (fp.string.isStringLike!S) {
 /// ---
 bool inRanges(const(uint[2])[] table, uint codepoint) {
 	immutable at = fp.algorithms.lowerBound!((range, c) => range[1] < c)(table, codepoint);
+	assert(at == table.length || table[at][0] <= table[at][1], "fp.string.utf.inRanges: a range that ends before it starts");
+	assert(at == 0 || at == table.length || table[at - 1][1] < table[at][0], "fp.string.utf.inRanges: ranges out of order or overlapping");
 	return at < table.length && table[at][0] <= codepoint;
 }
 
@@ -317,7 +345,8 @@ unittest { // well-formed and ill-formed sequences, validation, counting and ran
 
 // === conversion ================================================================
 
-/// Decodes UTF-8 into a new `fp.dynarray` of codepoints, which the caller frees with `fp.dynarray.free`; the dynarray is null when `text` is empty. Returns null, rather than a null dynarray, if `text` is not valid UTF-8 or an allocation was refused.
+/// Decodes UTF-8 into a new `fp.dynarray` of codepoints, which the caller frees with `fp.dynarray.free`; the dynarray is null when `text` is empty.
+/// Returns null, rather than a null dynarray, if `text` is not valid UTF-8 or an allocation was refused.
 ///
 /// Examples:
 /// ---
@@ -339,10 +368,14 @@ std.typecons.Nullable!(uint*) codepoints(S)(S text) @trusted if (fp.string.isStr
 			return typeof(return).init;
 		}
 	}
+	assert(at == view.length, "fp.string.utf.codepoints: read past the text");
+	assert(fp.dynarray.length(out_) <= view.length, "fp.string.utf.codepoints: more codepoints than bytes");
 	return typeof(return)(out_);
 }
 
-/// Converts UTF-8 into a new `fp.dynarray` of UTF-16 code units, which the caller frees with `fp.dynarray.free`; the dynarray is null when `text` is empty. A 0 unit follows the last, outside the length, so the result is also a null-terminated wide string, as Windows' wide APIs take. Returns null, rather than a null dynarray, if `text` is not valid UTF-8 or an allocation was refused.
+/// Converts UTF-8 into a new `fp.dynarray` of UTF-16 code units, which the caller frees with `fp.dynarray.free`; the dynarray is null when `text` is empty.
+/// A 0 unit follows the last, outside the length, so the result is also a null-terminated wide string, as Windows' wide APIs take.
+/// Returns null, rather than a null dynarray, if `text` is not valid UTF-8 or an allocation was refused.
 ///
 /// Examples:
 /// ---
@@ -372,12 +405,15 @@ std.typecons.Nullable!(wchar*) toUtf16(S)(S text) @trusted if (fp.string.isStrin
 		}
 	}
 	// Valid text needs exactly the units counted, so the terminator's slot is still reserved.
-	assert(fp.dynarray.capacity(out_) > fp.dynarray.length(out_));
+	assert(fp.dynarray.capacity(out_) > fp.dynarray.length(out_), "fp.string.utf.toUtf16: no room left for the terminator");
+	assert(fp.dynarray.length(out_) == utf16Length(view), "fp.string.utf.toUtf16: a different number of units than counted");
 	out_[fp.dynarray.length(out_)] = 0;
 	return typeof(return)(out_);
 }
 
-/// Encodes `codepoints` as a new fp string, which is null when there are none. Returns null, rather than a null string, if one is not encodable or the string could not be allocated. `codepoints` is a `uint` slice, or a `uint*` fat pointer such as the dynarray `codepoints` returns; like `fp.string.isStringLike`, a static array must be passed as `array[]`.
+/// Encodes `codepoints` as a new fp string, which is null when there are none.
+/// Returns null, rather than a null string, if one is not encodable or the string could not be allocated.
+/// `codepoints` is a `uint` slice, or a `uint*` fat pointer such as the dynarray `codepoints` returns; like `fp.string.isStringLike`, a static array must be passed as `array[]`.
 ///
 /// Examples:
 /// ---
@@ -401,10 +437,13 @@ std.typecons.Nullable!(char*) fromCodepoints(C)(C codepoints) @trusted if (!__tr
 			return typeof(return).init;
 		}
 	}
+	assert(fp.string.length(out_) >= view.length && fp.string.length(out_) <= 4 * view.length, "fp.string.utf.fromCodepoints: a byte count no encoding gives");
 	return typeof(return)(out_);
 }
 
-/// Converts UTF-16 code units into a new fp string, which is null when there are none. Returns null, rather than a null string, if they are not valid UTF-16, such as a lone surrogate, or the string could not be allocated. `units` is a `wchar` slice, or a `wchar*` fat pointer such as the dynarray `toUtf16` returns; like `fp.string.isStringLike`, a static array must be passed as `array[]`.
+/// Converts UTF-16 code units into a new fp string, which is null when there are none.
+/// Returns null, rather than a null string, if they are not valid UTF-16, such as a lone surrogate, or the string could not be allocated.
+/// `units` is a `wchar` slice, or a `wchar*` fat pointer such as the dynarray `toUtf16` returns; like `fp.string.isStringLike`, a static array must be passed as `array[]`.
 ///
 /// Examples:
 /// ---
@@ -432,6 +471,7 @@ std.typecons.Nullable!(char*) fromUtf16(U)(U units) @trusted if (!__traits(isSta
 			return typeof(return).init;
 		}
 	}
+	assert(fp.string.length(out_) >= view.length && fp.string.length(out_) <= 3 * view.length, "fp.string.utf.fromUtf16: a byte count no encoding gives");
 	return typeof(return)(out_);
 }
 

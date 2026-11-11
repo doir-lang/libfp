@@ -1,4 +1,7 @@
-/// Input and output. Whole files: reading one into an fp string, writing, appending to or removing one, and mapping one into memory, read-only or writable. Open descriptors: reading what has arrived, and writing. And the console: printing values to it, and reading it, or any descriptor, a line, word or token at a time, with an optional history.
+/// Input and output.
+/// Whole files: reading one into an fp string, writing, appending to or removing one, and mapping one into memory, read-only or writable.
+/// Open descriptors: reading what has arrived, and writing.
+/// And the console: printing values to it, and reading it, or any descriptor, a line, word or token at a time, with an optional history.
 ///
 /// Examples:
 /// ---
@@ -46,6 +49,8 @@ version(Windows) private extern(C) core.stdc.stdio.FILE* _wfopen(const(wchar)* p
 
 // The file at `path` opened in C `mode`, or null if it cannot be or the path's copy is refused.
 private core.stdc.stdio.FILE* open(const(char)[] path, const(char)* mode) @trusted {
+	assert(mode !is null && mode[0] != 0, "fp.io: opening a file with no mode");
+	assert(path.ptr !is null || path.length == 0, "fp.io: a path with a length but no bytes");
 	version(Windows) {
 		// fopen would read `path` in the ANSI code page rather than as UTF-8.
 		wchar* name = fp.string.utf.toUtf16(path).get(null);
@@ -53,7 +58,7 @@ private core.stdc.stdio.FILE* open(const(char)[] path, const(char)* mode) @trust
 		scope(exit) fp.dynarray.free(name);
 		wchar[4] wideMode = 0;
 		for (size_t i = 0; mode[i] != 0; ++i) {
-			assert(i < wideMode.length - 1);
+			assert(i < wideMode.length - 1, "fp.io: a mode longer than C's");
 			wideMode[i] = mode[i];
 		}
 		return _wfopen(name, wideMode.ptr);
@@ -70,6 +75,7 @@ private core.stdc.stdio.FILE* open(const(char)[] path, const(char)* mode) @trust
 			if (copy is null) return null;
 			name = copy;
 		}
+		assert(name[path.length] == 0, "fp.io: an unterminated path for fopen");
 		return core.stdc.stdio.fopen(name, mode);
 	}
 }
@@ -99,7 +105,9 @@ std.typecons.Nullable!(char*) readFile(const(char)[] path) {
 		immutable used = fp.dynarray.length(out_);
 		if ((used == 0 ? fp.dynarray.growToSize(out_, chunk) : fp.dynarray.grow(out_, chunk)) is null) break;
 		immutable n = core.stdc.stdio.fread(out_ + used, 1, chunk, f);
+		assert(n <= chunk, "fp.io.readFile: read more than asked for");
 		cast(void) fp.dynarray.removeLast(out_, chunk - n);
+		assert(fp.dynarray.length(out_) == used + n, "fp.io.readFile: the text's length lost track of what was read");
 		// Every allocation keeps a byte past its capacity for this terminator.
 		out_[used + n] = 0;
 		if (n < chunk) {
@@ -137,6 +145,8 @@ enum WriteMode {
 /// assert(!writeFile("no/such/directory/file", "text"));
 /// ---
 bool writeFile(const(char)[] path, const(char)[] text, WriteMode mode = WriteMode.replace) {
+	assert(mode == WriteMode.replace || mode == WriteMode.append, "fp.io.writeFile: a mode that is neither replace nor append");
+	assert(text.ptr !is null || text.length == 0, "fp.io.writeFile: text with a length but no bytes");
 	auto f = open(path, mode == WriteMode.append ? "ab" : "wb");
 	if (f is null) return false;
 	immutable wrote = core.stdc.stdio.fwrite(text.ptr, 1, text.length, f) == text.length;
@@ -166,6 +176,7 @@ bool removeFile(const(char)[] path) @trusted {
 		char* name = fp.string.clone(path).get(null);
 		if (name is null) return false;
 		scope(exit) fp.string.free(name);
+		assert(fp.string.length(name) == path.length, "fp.io.removeFile: a path copied to the wrong length");
 		return core.stdc.stdio.remove(name) == 0;
 	}
 }
@@ -173,13 +184,15 @@ bool removeFile(const(char)[] path) @trusted {
 
 // --- mapping -----------------------------------------------------------------
 
-/// A file mapped into memory read-only, released by `free`. Where memory mapping is unavailable, as on WASI, the file is read into memory instead, which a reader cannot tell apart.
+/// A file mapped into memory read-only, released by `free`.
+/// Where memory mapping is unavailable, as on WASI, the file is read into memory instead, which a reader cannot tell apart.
 struct MappedFile {
 	const(char)[] bytes; /// The file's contents; null for an empty file.
 	private bool read; // whether `bytes` is an fp string `readFile` made rather than a mapping
 }
 
-/// A file mapped into memory for reading and writing, released by `free`. Where memory mapping is unavailable, as on WASI, the file is read into memory instead, and what is written reaches the file only through `sync` or `free`.
+/// A file mapped into memory for reading and writing, released by `free`.
+/// Where memory mapping is unavailable, as on WASI, the file is read into memory instead, and what is written reaches the file only through `sync` or `free`.
 struct WritableMappedFile {
 	char[] bytes; /// The file's contents, whose changes are written to it; null for an empty file.
 	private char* path; // the fp string copy of the path that `sync` writes `bytes` back to, when they were read rather than mapped
@@ -203,8 +216,10 @@ version(posixMapping) {
 		core.sys.posix.sys.stat.stat_t status;
 		if (core.sys.posix.sys.stat.fstat(descriptor, &status) != 0 || !core.sys.posix.sys.stat.S_ISREG(status.st_mode)) return typeof(return).init;
 		if (status.st_size == 0) return typeof(return)(WritableMappedFile.init);
+		assert(status.st_size > 0, "fp.io: a file of negative size");
 		auto p = core.sys.posix.sys.mman.mmap(null, cast(size_t) status.st_size, protection, flags, descriptor, 0);
 		if (p == core.sys.posix.sys.mman.MAP_FAILED) return typeof(return).init;
+		assert(p !is null, "fp.io: a mapping at address zero");
 		return typeof(return)(WritableMappedFile((cast(char*) p)[0 .. cast(size_t) status.st_size]));
 	}
 }
@@ -217,7 +232,8 @@ version(windowsMapping) {
 		wchar* name = fp.string.utf.toUtf16(path).get(null);
 		if (name is null) return typeof(return).init;
 		scope(exit) fp.dynarray.free(name);
-		// Sharing everything matches POSIX, where a mapping locks nothing. Without backup semantics a directory does not open.
+		// Sharing everything matches POSIX, where a mapping locks nothing.
+		// Without backup semantics a directory does not open.
 		auto file = core.sys.windows.winbase.CreateFileW(name, access, core.sys.windows.winnt.FILE_SHARE_READ | core.sys.windows.winnt.FILE_SHARE_WRITE | core.sys.windows.winnt.FILE_SHARE_DELETE, null, core.sys.windows.winbase.OPEN_EXISTING, core.sys.windows.winnt.FILE_ATTRIBUTE_NORMAL, null);
 		if (file == core.sys.windows.winbase.INVALID_HANDLE_VALUE) return typeof(return).init;
 		bool kept = false;
@@ -241,7 +257,9 @@ version(windowsMapping) {
 	}
 }
 
-/// The file at `path` mapped into memory read-only. Writes to the file while it is mapped may show through `bytes`. On POSIX, truncating it makes reading past its new end raise `SIGBUS`; on Windows, a write that would truncate it, such as `writeFile`, fails while it is mapped.
+/// The file at `path` mapped into memory read-only.
+/// Writes to the file while it is mapped may show through `bytes`.
+/// On POSIX, truncating it makes reading past its new end raise `SIGBUS`; on Windows, a write that would truncate it, such as `writeFile`, fails while it is mapped.
 ///
 /// Returns null if the file cannot be opened, measured or mapped, `path` names a directory, or an allocation is refused.
 ///
@@ -261,10 +279,12 @@ std.typecons.Nullable!MappedFile map(const(char)[] path) @trusted {
 	}
 	version(memoryMapping) {
 		if (mapped.isNull) return typeof(return).init;
+		assert(mapped.get.bytes.ptr !is null || mapped.get.bytes.length == 0, "fp.io.map: a mapping with a length but no bytes");
 		return typeof(return)(MappedFile(mapped.get.bytes));
 	} else {
 		auto text = readFile(path);
 		if (text.isNull) return typeof(return).init;
+		assert(text.get is null || fp.dynarray.valid(text.get), "fp.io.map: read text that free cannot release");
 		return typeof(return)(MappedFile(fp.string.slice(text.get), true));
 	}
 }
@@ -279,6 +299,8 @@ std.typecons.Nullable!MappedFile map(const(char)[] path) @trusted {
 /// assert(file.get.bytes is null);
 /// ---
 void free(ref MappedFile file) @trusted {
+	assert(file.bytes.ptr !is null || file.bytes.length == 0, "fp.io.free: a mapping with a length but no bytes");
+	assert(!file.read || file.bytes.ptr is null || fp.dynarray.valid(cast(void*) file.bytes.ptr), "fp.io.free: read text that is not an fp string");
 	if (file.read) {
 		auto text = cast(char*) file.bytes.ptr;
 		fp.string.free(text);
@@ -294,7 +316,8 @@ void free(ref MappedFile file) @trusted {
 	file = MappedFile.init;
 }
 
-/// The file at `path` mapped into memory for reading and writing. The mapping is shared, so other readers of the file see what is written to it, and it has the file's size, so it cannot grow the file.
+/// The file at `path` mapped into memory for reading and writing.
+/// The mapping is shared, so other readers of the file see what is written to it, and it has the file's size, so it cannot grow the file.
 ///
 /// Returns null if the file cannot be opened for writing, measured or mapped, `path` names a directory, or an allocation is refused.
 ///
@@ -331,6 +354,7 @@ std.typecons.Nullable!WritableMappedFile mapForWriting(const(char)[] path) @trus
 			fp.string.free(name);
 			return typeof(return).init;
 		}
+		assert(name !is null, "fp.io.mapForWriting: no path for sync to write back to");
 		return typeof(return)(WritableMappedFile(fp.string.slice(text.get), name));
 	}
 }
@@ -352,6 +376,8 @@ std.typecons.Nullable!WritableMappedFile mapForWriting(const(char)[] path) @trus
 /// assert(free(file.get));
 /// ---
 bool sync(ref WritableMappedFile file) @trusted {
+	assert(file.bytes.ptr !is null || file.bytes.length == 0, "fp.io.sync: a mapping with a length but no bytes");
+	assert(file.path is null || fp.string.length(file.path) > 0, "fp.io.sync: an empty path to write back to");
 	if (file.path !is null) return writeFile(fp.string.slice(file.path), file.bytes);
 	if (file.bytes.length == 0) return true;
 	version(posixMapping) {
@@ -364,7 +390,8 @@ bool sync(ref WritableMappedFile file) @trusted {
 	} else return true;
 }
 
-/// Releases what `mapForWriting` mapped, leaving `file` empty. Where the file was read rather than mapped, it is first written back.
+/// Releases what `mapForWriting` mapped, leaving `file` empty.
+/// Where the file was read rather than mapped, it is first written back.
 ///
 /// Returns false if that write failed, in which case the file may hold part of `file.bytes`, or nothing; `file` is released either way.
 ///
@@ -376,6 +403,7 @@ bool sync(ref WritableMappedFile file) @trusted {
 /// assert(file.get.bytes is null);
 /// ---
 bool free(ref WritableMappedFile file) @trusted {
+	assert(file.bytes.ptr !is null || file.bytes.length == 0, "fp.io.free: a mapping with a length but no bytes");
 	bool wrote = true;
 	if (file.path !is null) {
 		wrote = writeFile(fp.string.slice(file.path), file.bytes);
@@ -393,6 +421,7 @@ bool free(ref WritableMappedFile file) @trusted {
 		}
 	}
 	file = WritableMappedFile.init;
+	assert(file.bytes is null && file.path is null, "fp.io.free: a mapping left behind");
 	return wrote;
 }
 
@@ -415,6 +444,7 @@ version(Windows) {
 
 	// Runs `transfer` on `descriptor` in binary mode, failing rather than ending the process if `descriptor` is bad.
 	private int guarded(int descriptor, scope int delegate() @nogc nothrow transfer) @trusted {
+		assert(transfer !is null, "fp.io: guarding no transfer");
 		auto previous = _set_thread_local_invalid_parameter_handler(&ignoreInvalidParameter);
 		scope(exit) cast(void) _set_thread_local_invalid_parameter_handler(previous);
 		if (_setmode(descriptor, binaryMode) < 0) return -1;
@@ -422,7 +452,9 @@ version(Windows) {
 	}
 }
 
-/// Reads up to `into.length` bytes from the open descriptor `descriptor` into `into`, in one read, and returns how many: 0 once the stream has ended, or when `into` is empty. It retries a read a signal interrupts. On Windows `descriptor` is a C runtime descriptor, which this leaves in binary mode, so the runtime neither adds nor drops carriage returns.
+/// Reads up to `into.length` bytes from the open descriptor `descriptor` into `into`, in one read, and returns how many: 0 once the stream has ended, or when `into` is empty.
+/// It retries a read a signal interrupts.
+/// On Windows `descriptor` is a C runtime descriptor, which this leaves in binary mode, so the runtime neither adds nor drops carriage returns.
 ///
 /// Returns -1 if `descriptor` is not open for reading or the read fails; `into` may then have changed.
 ///
@@ -432,14 +464,18 @@ version(Windows) {
 /// assert(readSome(-1, buffer[]) == -1);
 /// ---
 ptrdiff_t readSome(int descriptor, char[] into) @trusted {
+	assert(into.ptr !is null || into.length == 0, "fp.io.readSome: a buffer with a length but no bytes");
 	for (;;) {
 		version(Windows) immutable got = guarded(descriptor, () => _read(descriptor, into.ptr, cast(uint) (into.length < int.max ? into.length : int.max)));
 		else immutable got = core.sys.posix.unistd.read(descriptor, into.ptr, into.length);
+		assert(got < 0 || got <= into.length, "fp.io.readSome: read more than the buffer holds");
 		if (got >= 0 || core.stdc.errno.errno != core.stdc.errno.EINTR) return got;
 	}
 }
 
-/// Writes up to all of `bytes` to the open descriptor `descriptor`, in one write, and returns how many it took. It retries a write a signal interrupts. On Windows `descriptor` is a C runtime descriptor, which this leaves in binary mode, as `readSome` does.
+/// Writes up to all of `bytes` to the open descriptor `descriptor`, in one write, and returns how many it took.
+/// It retries a write a signal interrupts.
+/// On Windows `descriptor` is a C runtime descriptor, which this leaves in binary mode, as `readSome` does.
 ///
 /// Returns -1 if `descriptor` is not open for writing or the write fails.
 ///
@@ -448,14 +484,17 @@ ptrdiff_t readSome(int descriptor, char[] into) @trusted {
 /// assert(writeSome(-1, "text") == -1);
 /// ---
 ptrdiff_t writeSome(int descriptor, const(char)[] bytes) @trusted {
+	assert(bytes.ptr !is null || bytes.length == 0, "fp.io.writeSome: bytes with a length but no address");
 	for (;;) {
 		version(Windows) immutable wrote = guarded(descriptor, () => _write(descriptor, bytes.ptr, cast(uint) (bytes.length < int.max ? bytes.length : int.max)));
 		else immutable wrote = core.sys.posix.unistd.write(descriptor, bytes.ptr, bytes.length);
+		assert(wrote < 0 || wrote <= bytes.length, "fp.io.writeSome: wrote more than it was given");
 		if (wrote >= 0 || core.stdc.errno.errno != core.stdc.errno.EINTR) return wrote;
 	}
 }
 
-/// Writes all of `bytes` to the open descriptor `descriptor`, in as many writes as it takes, as `writeSome` does each. Writing nothing always succeeds.
+/// Writes all of `bytes` to the open descriptor `descriptor`, in as many writes as it takes, as `writeSome` does each.
+/// Writing nothing always succeeds.
 ///
 /// Returns false if a write fails or takes nothing, perhaps after some of `bytes` were written.
 ///
@@ -465,10 +504,13 @@ ptrdiff_t writeSome(int descriptor, const(char)[] bytes) @trusted {
 /// ---
 bool writeAll(int descriptor, const(char)[] bytes) {
 	while (bytes.length) {
+		immutable before = bytes.length;
 		immutable wrote = writeSome(descriptor, bytes);
 		if (wrote <= 0) return false;
 		bytes = bytes[wrote .. $];
+		assert(bytes.length < before, "fp.io.writeAll: a write that made no progress");
 	}
+	assert(bytes.length == 0, "fp.io.writeAll: bytes left unwritten");
 	return true;
 }
 
@@ -515,6 +557,7 @@ std.typecons.Nullable!Pipe createPipe() @trusted {
 	else {
 		version(Windows) immutable made = _pipe(descriptors.ptr, 65_536, binaryMode) == 0;
 		else immutable made = core.sys.posix.unistd.pipe(descriptors) == 0;
+		assert(!made || (descriptors[0] >= 0 && descriptors[1] >= 0 && descriptors[0] != descriptors[1]), "fp.io.createPipe: a pipe with a bad or shared end");
 		return made ? typeof(return)(Pipe(descriptors[0], descriptors[1])) : typeof(return).init;
 	}
 }
@@ -522,14 +565,16 @@ std.typecons.Nullable!Pipe createPipe() @trusted {
 
 // --- the console -------------------------------------------------------------
 
-/// The descriptors every process starts with, on POSIX, Windows and WASI alike, to pass wherever a descriptor is taken. Leading `print`'s values, one says where they go; any other open descriptor can lead them cast to `Console`.
+/// The descriptors every process starts with, on POSIX, Windows and WASI alike, to pass wherever a descriptor is taken.
+/// Leading `print`'s values, one says where they go; any other open descriptor can lead them cast to `Console`.
 enum Console : int {
 	input = 0, /// Standard input.
 	output = 1, /// Standard output.
 	error = 2, /// Standard error.
 }
 
-/// Writes `values` to standard output, or to the descriptor a leading `Console` names, as one `writeAll`: slices and fp strings as they are, characters as UTF-8, and numbers as `fp.string.append` writes them. Nothing goes through C's buffered `stdout`, so text printed here is not reordered against later writes to the same descriptor.
+/// Writes `values` to standard output, or to the descriptor a leading `Console` names, as one `writeAll`: slices and fp strings as they are, characters as UTF-8, and numbers as `fp.string.append` writes them.
+/// Nothing goes through C's buffered `stdout`, so text printed here is not reordered against later writes to the same descriptor.
 ///
 /// Returns false if an allocation was refused, writing nothing, or the write failed, perhaps after part of the text was written.
 ///
@@ -552,7 +597,9 @@ bool print(Values...)(Values values) {
 	return fp.string.append(text, pieces) && writeAll(descriptor, fp.string.slice(text));
 }
 
-/// Writes `message` to standard error, then ends the process abnormally through C's `abort`, which raises `SIGABRT` where there are signals and traps on WASI. Its pieces are slices, characters and integers, each written as it comes without allocating, so it can report a refused allocation; a write that fails is skipped. It does not return.
+/// Writes `message` to standard error, then ends the process abnormally through C's `abort`, which raises `SIGABRT` where there are signals and traps on WASI.
+/// Its pieces are slices, characters and integers, each written as it comes without allocating, so it can report a refused allocation; a write that fails is skipped.
+/// It does not return.
 ///
 /// Examples:
 /// ---
@@ -600,7 +647,9 @@ bool enableAnsiColorsAndUTF8() @trusted {
 /// How many bytes a `Reader` reads at a time.
 enum size_t readerBufferLength = 1024;
 
-/// Reads a descriptor, such as `Console.input`, a line, word or token at a time, through `read`. It reads ahead, so read the descriptor only through it once reading has begun. Set `descriptor`, and `echo` if lines edited at a terminal should show elsewhere; the rest starts empty.
+/// Reads a descriptor, such as `Console.input`, a line, word or token at a time, through `read`.
+/// It reads ahead, so read the descriptor only through it once reading has begun.
+/// Set `descriptor`, and `echo` if lines edited at a terminal should show elsewhere; the rest starts empty.
 struct Reader {
 	int descriptor; /// What it reads.
 	int echo = Console.output; /// Where a line being edited at a terminal is shown, which must be a terminal too for `read` to edit.
@@ -613,12 +662,15 @@ struct Reader {
 
 /// How `read` splits its input.
 enum Split {
-	lines, /// At each line break, as `fp.string.breaksLine` says: `\n`, `\r\n` or a lone `\r`. An empty line is a line.
+	/// At each line break, as `fp.string.breaksLine` says: `\n`, `\r\n` or a lone `\r`.
+	/// An empty line is a line.
+	lines,
 	words, /// At runs of ASCII whitespace (`fp.string.ascii.isWhitespace`), which are skipped, so a word is never empty.
 	tokens, /// At each byte of the delimiters `read` is given, each ending one token, so two in a row end an empty one.
 }
 
-/// What reads given it have returned, a copy of each, oldest first, keeping at most `limit` of the latest when `limit` is not 0, as a shell keeps its history. Release it with `free`.
+/// What reads given it have returned, a copy of each, oldest first, keeping at most `limit` of the latest when `limit` is not 0, as a shell keeps its history.
+/// Release it with `free`.
 struct History {
 	fp.lifecycle.Owned!char* entries; /// An fp dynarray of the entries; an empty one is a null string.
 	size_t limit; /// The most entries kept; 0 keeps every one.
@@ -638,6 +690,7 @@ void free(ref History history) {
 
 // Whether `c` ends a piece `split` splits off; `delimiters` end tokens.
 private bool endsPiece(Split split, const(char)[] delimiters, char c) {
+	assert(split == Split.tokens || delimiters.length == 0, "fp.io: only tokens take delimiters");
 	final switch (split) {
 		case Split.lines: return c == '\n' || c == '\r';
 		case Split.words: return fp.string.ascii.isWhitespace(c);
@@ -645,11 +698,15 @@ private bool endsPiece(Split split, const(char)[] delimiters, char c) {
 	}
 }
 
-// Appends a copy of `piece` to `history`, dropping the oldest entry past its limit. False, leaving it as it was, if an allocation was refused.
+// Appends a copy of `piece` to `history`, dropping the oldest entry past its limit.
+// False, leaving it as it was, if an allocation was refused.
 private bool record(ref History history, const(char)[] piece) {
+	assert(history.limit == 0 || fp.dynarray.length(history.entries) <= history.limit, "fp.io: a history past its limit");
 	auto copy = fp.string.clone(piece);
 	if (copy.isNull || !fp.dynarray.pushBack(history.entries, fp.lifecycle.Owned!char(copy.get))) return false; // a refused push ends the copy
 	if (history.limit != 0 && fp.dynarray.length(history.entries) > history.limit) cast(void) fp.dynarray.removeAt(history.entries, 0);
+	assert(history.limit == 0 || fp.dynarray.length(history.entries) <= history.limit, "fp.io: recording pushed a history past its limit");
+	assert(fp.string.equal(fp.dynarray.back(history.entries).p, piece), "fp.io: recorded something other than the piece");
 	return true;
 }
 
@@ -707,6 +764,7 @@ version(lineEditing) {
 
 	// Puts terminal `descriptor` back as `enterRawMode` found it.
 	private void restoreMode(int descriptor, ref const TerminalState saved) @trusted {
+		assert(descriptor >= 0, "fp.io: restoring a terminal that was never opened");
 		version(Windows) {
 			static import core.sys.windows.wincon;
 			cast(void) core.sys.windows.wincon.SetConsoleMode(cast(void*) _get_osfhandle(descriptor), saved.mode);
@@ -715,6 +773,7 @@ version(lineEditing) {
 
 	// The next byte `reader` reads, -1 once the input has ended, or -2 if the read failed.
 	private int nextByte(ref Reader reader) {
+		assert(reader.start <= reader.end && reader.end <= reader.buffer.length, "fp.io: a reader's buffer cursor past its end");
 		if (reader.start == reader.end) {
 			if (reader.ended) return -1;
 			immutable got = readSome(reader.descriptor, reader.buffer[]);
@@ -724,6 +783,7 @@ version(lineEditing) {
 			reader.end = got;
 			if (got == 0) return -1;
 		}
+		assert(reader.start < reader.end, "fp.io: reading past what the buffer holds");
 		return cast(ubyte) reader.buffer[reader.start++];
 	}
 
@@ -734,9 +794,11 @@ version(lineEditing) {
 		size_t shownCursor;
 	}
 
-	// Redraws `edit` on `echo`: back to the line's start, erase, the text, then back to the cursor. False if an allocation was refused.
+	// Redraws `edit` on `echo`: back to the line's start, erase, the text, then back to the cursor.
+	// False if an allocation was refused.
 	private bool redraw(ref Edit edit, int echo) {
 		const text = fp.string.slice(edit.text);
+		assert(edit.cursor <= text.length, "fp.io: a cursor past the line");
 		// A character still arriving byte by byte would be counted wrong; it is drawn once whole.
 		size_t lead = edit.cursor;
 		while (lead > 0 && (text[lead - 1] & 0xC0) == 0x80) --lead;
@@ -751,17 +813,127 @@ version(lineEditing) {
 		if (!ok) return false;
 		cast(void) writeAll(echo, fp.string.slice(drawn)); // only the display; the line is kept either way
 		edit.shownCursor = before;
+		assert(edit.shownCursor <= edit.cursor, "fp.io: a shown cursor past the bytes before it");
 		return true;
 	}
 
-	// Replaces `edit`'s text with a copy of `text`, the cursor at its end. False, leaving it as it was, if the copy was refused.
+	// Replaces `edit`'s text with a copy of `text`, the cursor at its end.
+	// False, leaving it as it was, if the copy was refused.
 	private bool replaceText(ref Edit edit, const(char)[] text) {
 		auto copy = fp.string.clone(text);
 		if (copy.isNull) return false;
 		fp.string.free(edit.text);
 		edit.text = copy.get;
 		edit.cursor = fp.string.length(edit.text);
+		assert(edit.cursor == text.length, "fp.io: a replaced line of the wrong length");
 		return true;
+	}
+
+	// An edit and the history it recalls from: `draft` is what was typed before the history was entered, and `recalled` the entry shown, or the entry count for the line being typed.
+	private struct LineEdit {
+		Edit edit;
+		const(History)* history;
+		char* draft;
+		size_t recalled;
+	}
+
+	// What a key did: nothing worth a redraw, a change to redraw, or a change an allocation refused.
+	private enum Key { ignored, applied, refused }
+
+	// Shows history entry `to`, or the draft at the entry count, keeping the draft when leaving it.
+	// False, changing nothing, if a copy was refused.
+	private bool recall(ref LineEdit line, size_t to) @trusted {
+		immutable entries = fp.dynarray.length(line.history.entries);
+		assert(to <= entries, "fp.io: recalling a history entry that does not exist");
+		if (line.recalled == entries) {
+			auto copy = fp.string.clone(fp.string.slice(line.edit.text));
+			if (copy.isNull) return false;
+			fp.string.free(line.draft);
+			line.draft = copy.get;
+		}
+		if (!replaceText(line.edit, to == entries ? fp.string.slice(line.draft) : fp.string.slice(line.history.entries[to].p))) return false;
+		line.recalled = to;
+		assert(line.recalled <= entries, "fp.io: recalled past the history");
+		return true;
+	}
+
+	// Removes bytes `from` to `to` of `edit`'s text, leaving the cursor where they were.
+	// False if the allocator refused.
+	private bool removeBytes(ref Edit edit, size_t from, size_t to) {
+		assert(from <= to && to <= fp.string.length(edit.text), "fp.io: removing bytes outside the line");
+		if (!fp.string.replaceRange(edit.text, from, to - from, "")) return false;
+		edit.cursor = from;
+		assert(edit.cursor <= fp.string.length(edit.text), "fp.io: a cursor past the line after removing bytes");
+		return true;
+	}
+
+	// Where the UTF-8 character before `edit`'s cursor starts, or 0.
+	private size_t previousCharacter(ref const Edit edit) @trusted {
+		assert(edit.cursor <= fp.string.length(edit.text), "fp.io: a cursor past the line");
+		size_t at = edit.cursor;
+		while (at > 0 && (edit.text[--at] & 0xC0) == 0x80) {}
+		assert(at <= edit.cursor && (at == edit.cursor || at == 0 || (edit.text[at] & 0xC0) != 0x80), "fp.io: stopped inside a character");
+		return at;
+	}
+
+	// Where the UTF-8 character at `edit`'s cursor ends, or the text's length.
+	private size_t nextCharacter(ref const Edit edit) @trusted {
+		size_t at = edit.cursor;
+		if (at < fp.string.length(edit.text)) ++at;
+		while (at < fp.string.length(edit.text) && (edit.text[at] & 0xC0) == 0x80) ++at;
+		assert(at >= edit.cursor && at <= fp.string.length(edit.text), "fp.io: the next character past the line");
+		return at;
+	}
+
+	// Reads the rest of a control sequence: its parameter digits into `parameter`, then the final byte, which names the key and is returned; 0 if the input ends first.
+	private int controlSequence(ref Reader reader, out int parameter) {
+		for (;;) {
+			immutable b = nextByte(reader);
+			if (b < 0) return 0;
+			assert(b <= 0xFF, "fp.io: a byte that does not fit one");
+			// A parameter past any key's number is clamped, so typed-ahead digits cannot overflow it.
+			if (b >= '0' && b <= '9') parameter = parameter > 9999 ? parameter : parameter * 10 + (b - '0');
+			if (b >= 0x40 && b <= 0x7E) return b;
+		}
+	}
+
+	// Applies the key a control sequence's final byte and parameter name: the arrows, Home, End and Delete.
+	private Key applySequence(ref LineEdit line, int final_, int parameter) {
+		immutable entries = fp.dynarray.length(line.history.entries);
+		assert(line.recalled <= entries, "fp.io: recalled past the history");
+		bool ok = true;
+		if (final_ == 'A' && line.recalled > 0) ok = recall(line, line.recalled - 1);
+		else if (final_ == 'B' && line.recalled < entries) ok = recall(line, line.recalled + 1);
+		else if (final_ == 'C') line.edit.cursor = nextCharacter(line.edit);
+		else if (final_ == 'D') line.edit.cursor = previousCharacter(line.edit);
+		else if (final_ == 'H' || (final_ == '~' && (parameter == 1 || parameter == 7))) line.edit.cursor = 0;
+		else if (final_ == 'F' || (final_ == '~' && (parameter == 4 || parameter == 8))) line.edit.cursor = fp.string.length(line.edit.text);
+		else if (final_ == '~' && parameter == 3) {
+			immutable next = nextCharacter(line.edit);
+			if (next > line.edit.cursor) ok = removeBytes(line.edit, line.edit.cursor, next);
+		} else return Key.ignored;
+		assert(line.edit.cursor <= fp.string.length(line.edit.text), "fp.io: a key left the cursor past the line");
+		return ok ? Key.applied : Key.refused;
+	}
+
+	// Applies byte `c`, a control key or a byte of typed text: Backspace, Ctrl-D, Ctrl-A, Ctrl-E, or an insertion at the cursor.
+	private Key applyByte(ref Edit edit, int c) {
+		assert(c >= 0 && c <= 0xFF, "fp.io: applying something that is not a byte");
+		assert(edit.cursor <= fp.string.length(edit.text), "fp.io: a cursor past the line");
+		bool ok = true;
+		if (c == 0x7F || c == 0x08) {
+			if (edit.cursor > 0) ok = removeBytes(edit, previousCharacter(edit), edit.cursor);
+		} else if (c == 0x04) {
+			immutable next = nextCharacter(edit);
+			if (next > edit.cursor) ok = removeBytes(edit, edit.cursor, next);
+		} else if (c == 0x01) edit.cursor = 0;
+		else if (c == 0x05) edit.cursor = fp.string.length(edit.text);
+		else if (c >= 0x20) {
+			immutable char[1] typed = [cast(char) c];
+			ok = fp.string.replaceRange(edit.text, edit.cursor, 0, typed[]);
+			if (ok) ++edit.cursor;
+		} else return Key.ignored;
+		return ok ? Key.applied : Key.refused;
 	}
 
 	// Reads one line from terminal `reader.descriptor`, which `enterRawMode` switched from `saved`, editing it in place with `history` to recall; `read` documents the keys.
@@ -772,124 +944,65 @@ version(lineEditing) {
 			restored = true;
 		}
 		scope(exit) restore();
-		Edit edit;
-		char* draft = null; // what was typed before the history was entered
-		scope(exit) fp.string.free(draft);
-		immutable entries = fp.dynarray.length(history.entries);
-		size_t recalled = entries; // the history entry shown, `entries` for the line being typed
-		bool fail() {
-			reader.failed = true;
-			fp.string.free(edit.text);
-			return false;
-		}
-		// Shows history entry `to`, or the draft at `entries`, keeping the draft when leaving it.
-		bool recall(size_t to) {
-			if (recalled == entries) {
-				auto copy = fp.string.clone(fp.string.slice(edit.text));
-				if (copy.isNull) return false;
-				fp.string.free(draft);
-				draft = copy.get;
-			}
-			if (!replaceText(edit, to == entries ? fp.string.slice(draft) : fp.string.slice(history.entries[to].p))) return false;
-			recalled = to;
-			return true;
-		}
-		bool removeBytes(size_t from, size_t to) {
-			if (!fp.string.replaceRange(edit.text, from, to - from, "")) return false;
-			edit.cursor = from;
-			return true;
-		}
-		size_t previousCharacter() {
-			size_t at = edit.cursor;
-			while (at > 0 && (edit.text[--at] & 0xC0) == 0x80) {}
-			return at;
-		}
-		size_t nextCharacter() {
-			size_t at = edit.cursor;
-			if (at < fp.string.length(edit.text)) ++at;
-			while (at < fp.string.length(edit.text) && (edit.text[at] & 0xC0) == 0x80) ++at;
-			return at;
-		}
+		LineEdit line;
+		line.history = &history;
+		line.recalled = fp.dynarray.length(history.entries);
+		scope(exit) fp.string.free(line.draft);
 		for (;;) {
+			assert(line.edit.cursor <= fp.string.length(line.edit.text), "fp.io: a cursor past the line");
 			immutable c = nextByte(reader);
-			if (c == -2) {
-				cast(void) fail();
-				return typeof(return).init;
-			}
-			if (c == -1 || (c == 0x04 && fp.string.length(edit.text) == 0)) {
+			if (c == -1 || (c == 0x04 && fp.string.length(line.edit.text) == 0)) {
 				// The input ended, or Ctrl-D on an empty line ends it as the terminal's end-of-file would.
 				cast(void) writeAll(reader.echo, "\r\n"); // only the display
-				if (fp.string.length(edit.text) > 0) return typeof(return)(edit.text);
+				if (fp.string.length(line.edit.text) > 0) return typeof(return)(line.edit.text);
 				return typeof(return).init;
 			}
-			if (reader.afterCarriageReturn) {
+			if (c != -2 && reader.afterCarriageReturn) {
 				reader.afterCarriageReturn = false;
 				if (c == '\n') continue;
 			}
-			bool ok = true;
 			if (c == '\r' || c == '\n') {
 				reader.afterCarriageReturn = c == '\r';
 				cast(void) writeAll(reader.echo, "\r\n"); // only the display
-				return typeof(return)(edit.text);
-			} else if (c == 0x03) {
+				return typeof(return)(line.edit.text);
+			}
+			Key key = Key.refused; // a failed read and Ctrl-C abandon the line as a refusal does
+			if (c == 0x03) {
 				// Ctrl-C: the terminal is restored first, so a SIGINT that ends the process leaves it usable.
 				cast(void) writeAll(reader.echo, "^C\r\n"); // only the display
 				restore();
 				static import core.stdc.signal;
 				cast(void) core.stdc.signal.raise(core.stdc.signal.SIGINT);
-				cast(void) fail();
-				return typeof(return).init;
-			} else if (c == 0x7F || c == 0x08) {
-				if (edit.cursor > 0) ok = removeBytes(previousCharacter(), edit.cursor);
-			} else if (c == 0x04) {
-				immutable cursor = edit.cursor, next = nextCharacter();
-				if (next > cursor) ok = removeBytes(cursor, next);
-			} else if (c == 0x01) edit.cursor = 0;
-			else if (c == 0x05) edit.cursor = fp.string.length(edit.text);
-			else if (c == 0x1B) {
+			} else if (c == 0x1B) {
 				immutable kind = nextByte(reader);
 				if (kind != '[' && kind != 'O') continue;
-				// A control sequence: parameter bytes, then a final byte that names the key.
-				int final_ = 0, parameter = 0;
-				for (;;) {
-					immutable b = nextByte(reader);
-					if (b < 0) break;
-					if (b >= '0' && b <= '9') parameter = parameter * 10 + (b - '0');
-					if (b >= 0x40 && b <= 0x7E) {
-						final_ = b;
-						break;
-					}
-				}
-				if (final_ == 'A' && recalled > 0) ok = recall(recalled - 1);
-				else if (final_ == 'B' && recalled < entries) ok = recall(recalled + 1);
-				else if (final_ == 'C') edit.cursor = nextCharacter();
-				else if (final_ == 'D') edit.cursor = previousCharacter();
-				else if (final_ == 'H' || (final_ == '~' && (parameter == 1 || parameter == 7))) edit.cursor = 0;
-				else if (final_ == 'F' || (final_ == '~' && (parameter == 4 || parameter == 8))) edit.cursor = fp.string.length(edit.text);
-				else if (final_ == '~' && parameter == 3) {
-					immutable cursor = edit.cursor, next = nextCharacter();
-					if (next > cursor) ok = removeBytes(cursor, next);
-				} else continue;
-			} else if (c >= 0x20) {
-				immutable char[1] typed = [cast(char) c];
-				ok = fp.string.replaceRange(edit.text, edit.cursor, 0, typed[]);
-				if (ok) ++edit.cursor;
-			} else continue;
-			if (!ok || !redraw(edit, reader.echo)) {
-				cast(void) fail();
+				int parameter;
+				immutable final_ = controlSequence(reader, parameter);
+				key = applySequence(line, final_, parameter);
+			} else if (c != -2) key = applyByte(line.edit, c);
+			if (key == Key.ignored) continue;
+			if (key == Key.refused || !redraw(line.edit, reader.echo)) {
+				reader.failed = true;
+				fp.string.free(line.edit.text);
 				return typeof(return).init;
 			}
 		}
 	}
 }
 
-/// The next line, word or token `reader` reads, as `split` says, without what ended it, as a new fp string the caller frees; an empty one is a null string. `delimiters` are the bytes that end a token, and are given only for `Split.tokens`. If `history` is given, a copy of what is returned is recorded in it.
+/// The next line, word or token `reader` reads, as `split` says, without what ended it, as a new fp string the caller frees; an empty one is a null string.
+/// `delimiters` are the bytes that end a token, and are given only for `Split.tokens`.
+/// If `history` is given, a copy of what is returned is recorded in it.
 ///
-/// A line ends at a lone `\r` without waiting to see whether a `\n` follows, so a terminal that sends `\r` for Enter is answered at once; a `\n` that does follow is skipped by the next read. The input's last line, word or token needs nothing after it.
+/// A line ends at a lone `\r` without waiting to see whether a `\n` follows, so a terminal that sends `\r` for Enter is answered at once; a `\n` that does follow is skipped by the next read.
+/// The input's last line, word or token needs nothing after it.
 ///
-/// Reading lines with a `history` from a terminal, when `reader.echo` is one too, edits each line in place, as a shell does: Up and Down recall the history, Down past its newest entry returning to what was being typed; Left, Right, Home and End (or Ctrl-A and Ctrl-E) move by whole UTF-8 characters; Backspace and Delete remove one; Enter ends the line; and Ctrl-D on an empty line ends the input. Ctrl-C restores the terminal and raises `SIGINT`; if that returns, the line is abandoned as a failed read. On WASI, which has no terminal control, lines are read as from any descriptor.
+/// Reading lines with a `history` from a terminal, when `reader.echo` is one too, edits each line in place, as a shell does: Up and Down recall the history, Down past its newest entry returning to what was being typed; Left, Right, Home and End (or Ctrl-A and Ctrl-E) move by whole UTF-8 characters; Backspace and Delete remove one; Enter ends the line; and Ctrl-D on an empty line ends the input.
+/// Ctrl-C restores the terminal and raises `SIGINT`; if that returns, the line is abandoned as a failed read.
+/// On WASI, which has no terminal control, lines are read as from any descriptor.
 ///
-/// Returns null once the input has ended. Returns null with `reader.failed` set if a read failed or an allocation was refused, for the piece or for its copy in `history`; that piece is then lost, and `history` is as it was.
+/// Returns null once the input has ended.
+/// Returns null with `reader.failed` set if a read failed or an allocation was refused, for the piece or for its copy in `history`; that piece is then lost, and `history` is as it was.
 ///
 /// Examples:
 /// ---
@@ -939,6 +1052,7 @@ std.typecons.Nullable!(char*) read(ref Reader reader, Split split, History* hist
 			++reader.start;
 			continue;
 		}
+		assert(reader.start < reader.end && reader.end <= reader.buffer.length, "fp.io.read: a buffer cursor past what was read");
 		const pending = reader.buffer[reader.start .. reader.end];
 		size_t at = 0;
 		while (at < pending.length && !endsPiece(split, delimiters, pending[at])) ++at;
@@ -953,6 +1067,7 @@ std.typecons.Nullable!(char*) read(ref Reader reader, Split split, History* hist
 		++reader.start;
 		break;
 	}
+	assert(reader.start <= reader.end, "fp.io.read: a buffer cursor past what was read");
 	if (!reader.failed && started && (history is null || record(*history, fp.string.slice(piece)))) return typeof(return)(piece);
 	reader.failed = reader.failed || started;
 	fp.string.free(piece);
@@ -1360,7 +1475,9 @@ version(lineEditing) version(Posix) unittest { // line editing at a terminal: ke
 	expectLine("abc\x01\x04\x1b[4~\x1b[1~\x1b[Z\x1bx\x05!\x02\x1b[7~\x1b[8~\x08\x1b[3~!\r", "bc!");
 	// Up stops at the oldest entry and Down at the line being typed.
 	expectLine("\x1b[A\x1b[A\x1b[A\x1b[A\x1b[A\x1b[A\x1b[A\r", "first");
-	expectLine("\x1b[Bz\x1b[C\x1b[D\x1b[D\x1b[D\r", "z");
+	// A parameter longer than any key's number is no key, rather than one its digits overflow into.
+	expectLine("ab\x1b[D\x1b[42949672963~\r", "ab");
+	expectLine("\x1b[B\x1b[Bz\x1b[C\x1b[D\x1b[D\x1b[D\r", "z");
 
 	// Ctrl-D on an empty line ends the input, recording nothing.
 	immutable entries = fp.dynarray.length(history.entries);

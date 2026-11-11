@@ -1,6 +1,13 @@
-/// A hopscotch-hashing, open-addressing hash set on top of `fp.dynarray`. A table is a plain `T*` to its slots, so it indexes like any fat pointer; every key sits within `Config.neighborhoodSize` slots of the slot its hash selects. An insert whose neighborhood is full moves other keys, each within its own neighborhood, to free a slot in it, and grows the table only when no such moves exist; so an insert may move keys, and a pointer into the table lasts only until the next insert.
+/// A hopscotch-hashing, open-addressing hash set on top of `fp.dynarray`.
+/// A table is a plain `T*` to its slots, so it indexes like any fat pointer; every key sits within `Config.neighborhoodSize` slots of the slot its hash selects.
+/// An insert whose neighborhood is full moves other keys, each within its own neighborhood, to free a slot in it, and grows the table only when no such moves exist; so an insert may move keys, and a pointer into the table lasts only until the next insert.
 ///
-/// Keys are compared and hashed by their bytes unless `Config` says otherwise. A key type that declares a lifetime (see `fp.lifecycle`) is moved into its slot and finalized when it is removed or the table freed, unless the config names other functions. Keys are passed by value: `insert` and `insertNew` take over the copy they are given, moving it into the table or ending it when it is not stored, while `find`, `contains` and `remove` leave the caller's key alone and end only the copy they make to read it. An owning key type should end its lifetime with `finalize` rather than `~this`, since a `~this` would run on the copy every call makes. A key type whose `this(this)` postblit changes its bytes, as a deep copy does, cannot be looked up by value, since the copy every call makes is no longer byte-equal to the stored key; such a type needs a `Config` with a `hashFunction` and `equalFunction` that read its contents. A null `T*` is not a table: make one with `create`.
+/// Keys are compared and hashed by their bytes unless `Config` says otherwise.
+/// A key type that declares a lifetime (see `fp.lifecycle`) is moved into its slot and finalized when it is removed or the table freed, unless the config names other functions.
+/// Keys are passed by value: `insert` and `insertNew` take over the copy they are given, moving it into the table or ending it when it is not stored, while `find`, `contains` and `remove` leave the caller's key alone and end only the copy they make to read it.
+/// An owning key type should end its lifetime with `finalize` rather than `~this`, since a `~this` would run on the copy every call makes.
+/// A key type whose `this(this)` postblit changes its bytes, as a deep copy does, cannot be looked up by value, since the copy every call makes is no longer byte-equal to the stored key; such a type needs a `Config` with a `hashFunction` and `equalFunction` that read its contents.
+/// A null `T*` is not a table: make one with `create`.
 ///
 /// Examples:
 /// ---
@@ -31,7 +38,9 @@ public import fp.lifecycle : Finalizer;
 alias HashFunction = size_t function(inout(ubyte)[]);
 /// Whether two keys' bytes denote the same key.
 alias EqualFunction = bool function(inout(ubyte)[], inout(ubyte)[]);
-/// Puts a key into its slot. Called once per insert; growing the table moves keys without it. It must leave the slot holding the bytes it was given, since the table hashes those bytes before placing them, and for a key type with a lifetime it must take that lifetime over: `insert` ends the call's copy only when the insert fails.
+/// Puts a key into its slot.
+/// Called once per insert; growing the table moves keys without it.
+/// It must leave the slot holding the bytes it was given, since the table hashes those bytes before placing them, and for a key type with a lifetime it must take that lifetime over: `insert` ends the call's copy only when the insert fails.
 alias CopyFunction = void* function(void*, inout(void)*, size_t);
 
 // wrapper: adapts fp.algorithms.hashBytes to HashFunction
@@ -40,6 +49,8 @@ private size_t defaultHash(inout(ubyte)[] data) {
 }
 
 private bool defaultEqual(inout(ubyte)[] a, inout(ubyte)[] b) @trusted {
+	assert(a.ptr !is null || a.length == 0, "fp.hashtable: a key slice with a length but no bytes");
+	assert(b.ptr !is null || b.length == 0, "fp.hashtable: a key slice with a length but no bytes");
 	if (a.length != b.length) return false;
 	return core.stdc.string.memcmp(a.ptr, b.ptr, a.length) == 0;
 }
@@ -51,12 +62,15 @@ private void* defaultCopy(void* destination, inout(void)* source, size_t n) @tru
 
 // For a key type with a lifetime, `create!T` uses this instead of `defaultCopy`: a move, so the call's temporary does not also release the key.
 private void* moveSlot(T)(void* destination, inout(void)* source, size_t n) @trusted {
+	assert(n == T.sizeof, "fp.hashtable: moving a key of the wrong size");
+	assert(destination !is null && source !is null && destination !is source, "fp.hashtable: moving a key to or from nowhere, or onto itself");
 	fp.lifecycle.moveInto(*cast(T*) destination, *cast(T*) source);
 	return destination;
 }
 
 
-/// How a table hashes, compares, copies and finalizes its keys, and how it is sized. The defaults treat keys as plain bytes; struct keys have the padding between their fields zeroed first, so two keys with the same fields match however their padding was left.
+/// How a table hashes, compares, copies and finalizes its keys, and how it is sized.
+/// The defaults treat keys as plain bytes; struct keys have the padding between their fields zeroed first, so two keys with the same fields match however their padding was left.
 ///
 /// Examples:
 /// ---
@@ -70,14 +84,19 @@ struct Config {
 	HashFunction hashFunction = &defaultHash; /// `fp.algorithms.hashBytes` by default.
 	EqualFunction equalFunction = &defaultEqual; /// `memcmp` by default.
 	CopyFunction copyFunction = &defaultCopy; /// `memcpy` by default; `create!T` replaces it with a move for a key type that declares a lifetime.
-	Finalizer finalizer = null; /// Called on each key removed or freed with the table; null for none. `create!T` sets it for key types that declare a lifetime.
+	/// Called on each key removed or freed with the table; null for none.
+	/// `create!T` sets it for key types that declare a lifetime.
+	Finalizer finalizer = null;
 	size_t baseSize = 8; /// The number of slots `create` allocates, which must be greater than zero.
-	size_t neighborhoodSize = maxNeighborhoodSize; /// How far past its home slot a key may sit: from 1 to `maxNeighborhoodSize`. The widest lets a table fill to about 90% before it grows; 8 grows it at about half.
+	/// How far past its home slot a key may sit: from 1 to `maxNeighborhoodSize`.
+	/// The widest lets a table fill to about 90% before it grows; 8 grows it at about half.
+	size_t neighborhoodSize = maxNeighborhoodSize;
 	size_t maxFailRetries = 8; /// How many times one insert may grow the table before giving up.
 }
 
 
-/// A hash table's header, in front of the dynarray header its slots have, after the padding that aligns the slots. `entryInfos` holds one word per slot: bit `i` set means slot `home + i` holds a key whose hash selects this slot, and `occupiedBit` means this slot itself holds a key.
+/// A hash table's header, in front of the dynarray header its slots have, after the padding that aligns the slots.
+/// `entryInfos` holds one word per slot: bit `i` set means slot `home + i` holds a key whose hash selects this slot, and `occupiedBit` means this slot itself holds a key.
 package struct Header {
 	private ubyte[fp.pointer.headerPadding!((size_t*).sizeof + Config.sizeof + fp.dynarray.Header.sizeof)] padding;
 	size_t* entryInfos; /// A dynarray parallel to the slots.
@@ -91,7 +110,8 @@ enum size_t maxNeighborhoodSize = 31;
 private enum size_t occupiedBit = size_t(1) << maxNeighborhoodSize;
 
 // wrapper: names the header lookup for a hash table header
-/// The header in front of table `p`. For null it returns a zeroed shared dummy, so queries on a null table read as empty rather than faulting.
+/// The header in front of table `p`.
+/// For null it returns a zeroed shared dummy, so queries on a null table read as empty rather than faulting.
 ///
 /// Examples:
 /// ---
@@ -106,7 +126,8 @@ package Header* headerOf(inout void* p) {
 
 
 private size_t* entryInfoAt(inout void* table, size_t index) @trusted {
-	assert(index < fp.pointer.length(headerOf(table).entryInfos));
+	assert(index < fp.pointer.length(headerOf(table).entryInfos), "fp.hashtable: a slot past the table");
+	assert(fp.pointer.length(headerOf(table).entryInfos) == fp.pointer.length(table), "fp.hashtable: the entry infos and the slots disagree in length");
 	return headerOf(table).entryInfos + index;
 }
 
@@ -120,21 +141,29 @@ private void setEntryOccupied(inout void* table, size_t index, bool state) @trus
 }
 
 private size_t computeHash(inout void* table, inout(ubyte)[] key) @trusted {
+	assert(fp.pointer.length(table) > 0, "fp.hashtable: hashing into a table with no slots");
+	assert(key.length > 0, "fp.hashtable: hashing an empty key");
 	return headerOf(table).config.hashFunction(key) % fp.pointer.length(table);
 }
 
 private size_t hashDistance(inout void* table, size_t hash, size_t position) @trusted {
 	immutable size = fp.pointer.length(table);
-	return position < hash ? size - hash + position : position - hash;
+	assert(hash < size && position < size, "fp.hashtable: a slot past the table");
+	immutable distance = position < hash ? size - hash + position : position - hash;
+	assert(distance < size, "fp.hashtable: a distance past the table");
+	return distance;
 }
 
 // How far past its home an insert looks for a free slot to hop back into its neighborhood; beyond it the table grows.
 private enum size_t maxProbe = 1024;
 
-// A free slot in `hash`'s neighborhood, or `fp.pointer.notFound`. A farther one is hopped back, hopscotch-style, by moving `keySize`-byte keys that stay near home into it.
+// A free slot in `hash`'s neighborhood, or `fp.pointer.notFound`.
+// A farther one is hopped back, hopscotch-style, by moving `keySize`-byte keys that stay near home into it.
 private size_t findEmptyHashPosition(void* table, size_t hash, size_t keySize) @trusted {
 	immutable neighborhoodSize = headerOf(table).config.neighborhoodSize;
 	immutable size = fp.pointer.length(table);
+	assert(hash < size, "fp.hashtable: a home past the table");
+	assert(neighborhoodSize > 0 && neighborhoodSize <= maxNeighborhoodSize, "fp.hashtable: a neighborhood outside its bounds");
 	immutable reach = neighborhoodSize < size ? neighborhoodSize : size;
 	foreach (i; 0 .. reach) {
 		immutable probe = (hash + i) % size;
@@ -161,6 +190,7 @@ private size_t findEmptyHashPosition(void* table, size_t hash, size_t keySize) @
 			foreach (i; 0 .. back) {
 				if ((info & (size_t(1) << i)) == 0) continue;
 				from = (home + i) % size;
+				assert(computeHash(table, slots[from * keySize .. (from + 1) * keySize]) == home, "fp.hashtable: a home lists a key that hashes elsewhere");
 				core.stdc.string.memcpy(slots + free * keySize, slots + from * keySize, keySize);
 				*entryInfoAt(table, home) = (info & ~(size_t(1) << i)) | (size_t(1) << back);
 				setEntryOccupied(table, free, true);
@@ -170,8 +200,11 @@ private size_t findEmptyHashPosition(void* table, size_t hash, size_t keySize) @
 			if (from != fp.pointer.notFound) break;
 		}
 		if (from == fp.pointer.notFound) return fp.pointer.notFound;
+		assert(!entryOccupied(table, from), "fp.hashtable: a hop left its old slot occupied");
+		assert(hashDistance(table, hash, from) < hashDistance(table, hash, free), "fp.hashtable: a hop that does not bring the free slot nearer home");
 		free = from;
 	}
+	assert(!entryOccupied(table, free) && hashDistance(table, hash, free) < neighborhoodSize, "fp.hashtable: the free slot found is taken or out of reach");
 	return free;
 }
 
@@ -201,11 +234,48 @@ bool valid(inout void* p) @trusted {
 /// ---
 size_t capacity(inout void* p) @trusted {
 	if (!valid(p)) return 0;
+	assert(headerOf(p).base.capacity == fp.pointer.length(p), "fp.hashtable: a table's capacity is its slot count");
+	assert(headerOf(p).base.capacity > 0, "fp.hashtable: a table with no slots");
 	return headerOf(p).base.capacity;
 }
 
+/// Whether every invariant of `table` holds: each key lies within its home slot's neighborhood, the home's neighborhood bits name exactly the slots holding its keys, and no bit names an empty slot.
+/// Null holds them as an empty table does.
+/// It hashes every key, so it is for tests and audits, and it fails while a key changed in place awaits `rehash`.
+///
+/// Examples:
+/// ---
+/// int* table = create!int();
+/// scope(exit) free(table);
+/// assert(insert(table, 3) !is null);
+/// assert(validate(table));
+/// ---
+bool validate(T)(inout T* table) @trusted {
+	if (table is null) return true;
+	if (!valid(table)) return false;
+	immutable size = fp.pointer.length(table), neighborhoodSize = headerOf(table).config.neighborhoodSize;
+	if (size == 0 || neighborhoodSize == 0 || neighborhoodSize > maxNeighborhoodSize || fp.pointer.length(headerOf(table).entryInfos) != size) return false;
+	ubyte* slots = cast(ubyte*) table;
+	size_t occupiedSlots = 0, homedKeys = 0;
+	foreach (position; 0 .. size) {
+		immutable info = *entryInfoAt(table, position);
+		foreach (i; 0 .. maxNeighborhoodSize) {
+			if ((info & (size_t(1) << i)) == 0) continue;
+			if (i >= neighborhoodSize || !entryOccupied(table, (position + i) % size)) return false;
+			++homedKeys;
+		}
+		if (!entryOccupied(table, position)) continue;
+		++occupiedSlots;
+		immutable home = computeHash(cast(void*) table, slots[position * T.sizeof .. (position + 1) * T.sizeof]);
+		immutable distance = hashDistance(table, home, position);
+		if (distance >= neighborhoodSize || (*entryInfoAt(table, home) & (size_t(1) << distance)) == 0) return false;
+	}
+	return homedKeys == occupiedSlots;
+}
 
-/// Creates an empty table with `config.baseSize` slots, or returns null if the allocator refused or the slots' byte count would overflow. A key type with a lifetime gets `copyFunction` and `finalizer` for it, unless the config already names them.
+
+/// Creates an empty table with `config.baseSize` slots, or returns null if the allocator refused or the slots' byte count would overflow.
+/// A key type with a lifetime gets `copyFunction` and `finalizer` for it, unless the config already names them.
 ///
 /// Examples:
 /// ---
@@ -235,10 +305,21 @@ T* create(T)(Config config = Config.init) @trusted {
 	}
 	core.stdc.string.memset(header.entryInfos, 0, size_t.sizeof * config.baseSize);
 	fp.lifecycle.emptySlots(output, config.baseSize);
+	assert(valid(output) && fp.pointer.length(output) == config.baseSize, "fp.hashtable: create made the wrong number of slots");
+	assert(occupiedCount(output) == 0, "fp.hashtable: a new table holds keys");
 	return output;
 }
 
+// The occupied slots of `table`, counted; for asserts, since a table keeps no count.
+private size_t occupiedCount(T)(inout T* table) @trusted {
+	size_t count = 0;
+	foreach (i; 0 .. fp.pointer.length(table)) count += entryOccupied(table, i);
+	assert(count <= fp.pointer.length(table), "fp.hashtable: more keys than slots");
+	return count;
+}
+
 private void finalizeAll(T)(T* table) @trusted {
+	assert(valid(table), "fp.hashtable: finalizing something other than a table");
 	if (headerOf(table).config.finalizer is null) return;
 	ubyte* slots = cast(ubyte*) table;
 	foreach (i; 0 .. fp.pointer.length(table))
@@ -248,11 +329,14 @@ private void finalizeAll(T)(T* table) @trusted {
 
 // Frees `table` without finalizing its keys, for when they have been copied elsewhere.
 private void release(T)(T* table) @trusted {
+	assert(valid(table), "fp.hashtable: releasing something other than a table");
+	assert(fp.dynarray.valid(headerOf(table).entryInfos), "fp.hashtable: a table without its entry infos");
 	fp.dynarray.free(headerOf(table).entryInfos);
 	cast(void)fp.pointer.allocator(headerOf(table), 0);
 }
 
-/// Finalizes every key (if the table has a `finalizer`), frees the table and sets `table` to null. Freeing null, or a pointer that is not a table, is a no-op.
+/// Finalizes every key (if the table has a `finalizer`), frees the table and sets `table` to null.
+/// Freeing null, or a pointer that is not a table, is a no-op.
 ///
 /// Examples:
 /// ---
@@ -264,15 +348,19 @@ private void release(T)(T* table) @trusted {
 void free(T)(ref T* table) {
 	// Neither null nor a non-table can be freed through `headerOf`: the shared dummy, or a header too small for this module's.
 	if (!valid(table)) return;
+	assert(fp.pointer.length(headerOf(table).entryInfos) == fp.pointer.length(table), "fp.hashtable.free: the entry infos and the slots disagree in length");
 	finalizeAll(table);
 	release(table);
 	table = null;
 }
 
 
+// bounded: the table's `maxFailRetries`, which `failures` counts towards
 // `place` says how the key enters its slot: `copyFunction` for a caller's key, `defaultCopy` for a rebuilt table's own key, `moveSlot!T` for a clone's copy.
 private void* insertImpl(T)(ref T* table, inout(ubyte)[] key, size_t failures, CopyFunction place) @trusted {
 	assert(valid(table), "fp.hashtable: not a table; make one with create");
+	assert(key.length == T.sizeof, "fp.hashtable: a key of the wrong size");
+	assert(failures <= headerOf(table).config.maxFailRetries, "fp.hashtable: grown more times than maxFailRetries allows");
 	immutable hash = computeHash(table, key);
 	immutable position = findEmptyHashPosition(table, hash, key.length);
 
@@ -288,10 +376,12 @@ private void* insertImpl(T)(ref T* table, inout(ubyte)[] key, size_t failures, C
 	place(slots + key.length * position, key.ptr, key.length);
 	*entryInfoAt(table, hash) |= (size_t(1) << hashDistance(table, hash, position));
 	setEntryOccupied(table, position, true);
+	assert(hashDistance(table, hash, position) < headerOf(table).config.neighborhoodSize, "fp.hashtable: a key placed outside its neighborhood");
 	return slots + key.length * position;
 }
 
-/// A new table with the same config as `source` holding a copy of every key in it, or null if `source` is not a table, the allocator refused, or a key's copy was refused. Keys are copied through `fp.lifecycle.copyInto`, so a key type that owns something deep-copies it and `source` keeps its own.
+/// A new table with the same config as `source` holding a copy of every key in it, or null if `source` is not a table, the allocator refused, or a key's copy was refused.
+/// Keys are copied through `fp.lifecycle.copyInto`, so a key type that owns something deep-copies it and `source` keeps its own.
 ///
 /// Examples:
 /// ---
@@ -322,58 +412,94 @@ T* clone(T)(inout T* source) {
 			return null;
 		}
 	}
+	assert(occupiedCount(fresh) == occupiedCount(source), "fp.hashtable: a clone with a different number of keys");
+	assert(validate(fresh), "fp.hashtable: a clone broke the table's invariants");
 	return fresh;
 }
 
-// Moves every key into a fresh table of `newSize` slots, which replaces `table` only once all are placed. Returns what `rehash` does.
-private size_t rebuild(T)(ref T* table, size_t newSize, size_t failures) @trusted {
+// Moves every key into a fresh table of `newSize` slots, which replaces `table` only once all are placed; with `distinct`, only the first of keys that compare equal, the others finalized.
+// Returns what `rehash` does.
+private size_t rebuild(T)(ref T* table, size_t newSize, size_t failures, bool distinct = false) @trusted {
+	assert(valid(table), "fp.hashtable: rebuilding something other than a table");
+	assert(newSize >= occupiedCount(table), "fp.hashtable: rebuilding into fewer slots than there are keys");
 	Config config = headerOf(table).config;
 	config.baseSize = newSize;
 	T* fresh = create!T(config);
 	if (fresh is null) return fp.pointer.allocationRefused;
 
 	ubyte* slots = cast(ubyte*) table;
+	size_t* dropped = null; // slots of `table` whose keys an earlier slot already holds, finalized once `fresh` replaces it
+	scope(exit) fp.dynarray.free(dropped);
 	foreach (i; 0 .. fp.pointer.length(table)) {
-		if (entryOccupied(table, i) && insertImpl(fresh, slots[i * T.sizeof .. (i + 1) * T.sizeof], failures, &defaultCopy) is null) {
+		if (!entryOccupied(table, i)) continue;
+		auto key = slots[i * T.sizeof .. (i + 1) * T.sizeof];
+		if (distinct && locateBytes(fresh, key) != fp.pointer.notFound) {
+			if (fp.dynarray.pushBack(dropped, i)) continue;
+			release(fresh);
+			return fp.pointer.allocationRefused;
+		}
+		if (insertImpl(fresh, key, failures, &defaultCopy) is null) {
 			release(fresh);
 			return i;
 		}
 	}
+	if (config.finalizer !is null)
+		foreach (i; fp.dynarray.slice(dropped)) config.finalizer(slots[i * T.sizeof .. (i + 1) * T.sizeof]);
+	immutable keys = occupiedCount(table);
 	release(table);
 	table = fresh;
+	assert(validate(table), "fp.hashtable: a rebuild broke the table's invariants");
+	assert(occupiedCount(table) == keys - fp.dynarray.length(dropped), "fp.hashtable: a rebuild lost or gained keys");
 	return fp.pointer.notFound;
 }
 
-/// Rebuilds the table by moving every key into a fresh one of the same size, which may grow if a key cannot be placed; `failures` counts the growths already spent against `Config.maxFailRetries`. Returns true on success. Returns false if the fresh table could not be allocated or a key could not be placed, leaving the table as it was. A null `table` is not a table, so it is left alone and reported as success.
+/// Rebuilds the table by moving every key into a fresh one of the same size, which may grow if a key cannot be placed; `failures` counts the growths already spent against `Config.maxFailRetries`.
+/// With `distinct`, only the first, in slot order, of keys that compare equal is kept and the others are finalized, as a table needs after its keys were rewritten in place so that some became equal: equal keys share a neighborhood, so past its size they cannot all be placed.
+/// Returns true on success.
+/// Returns false if the fresh table could not be allocated or a key could not be placed, leaving the table as it was.
+/// A null `table` is not a table, so it is left alone and reported as success.
 ///
 /// Examples:
 /// ---
 /// int* table = create!int();
 /// scope(exit) free(table);
-/// assert(insert(table, 1) !is null);
+/// assert(insert(table, 1) !is null && insert(table, 2) !is null);
 /// assert(rehash(table, 0));
 /// assert(contains(table, 1));
+/// foreach (key; occupied(table)) *key = 7; // both keys rewritten to one
+/// assert(rehash(table, 0, true) && contains(table, 7));
+/// size_t kept = 0;
+/// foreach (key; occupied(table)) ++kept;
+/// assert(kept == 1);
 ///
 /// int* nothing = null;
 /// assert(rehash(nothing, 0));
 /// ---
-bool rehash(T)(ref T* table, size_t failures) {
+bool rehash(T)(ref T* table, size_t failures, bool distinct = false) {
 	if (!valid(table)) return true;
-	return rebuild(table, fp.pointer.length(table), failures) == fp.pointer.notFound;
+	immutable slots = fp.pointer.length(table);
+	immutable rebuilt = rebuild(table, slots, failures, distinct) == fp.pointer.notFound;
+	assert(valid(table) && fp.pointer.length(table) >= slots, "fp.hashtable.rehash: lost the table or shrank it");
+	return rebuilt;
 }
 
 
-// Places `key`, taking its lifetime over, without checking for a duplicate. By `ref` so `insert` can hand its own copy over without making another.
+// Places `key`, taking its lifetime over, without checking for a duplicate.
+// By `ref` so `insert` can hand its own copy over without making another.
 private T* insertUnique(T)(ref T* table, ref T key) @trusted {
+	assert(valid(table), "fp.hashtable: not a table; make one with create");
 	fp.lifecycle.normalizePadding(key);
 	ubyte* keyBytes = cast(ubyte*) &key;
 	T* stored = cast(T*) insertImpl(table, keyBytes[0 .. T.sizeof], 0, headerOf(table).config.copyFunction);
 	if (stored is null) fp.lifecycle.endLifetime(key);
+	assert(stored is null || (stored >= table && stored < table + fp.pointer.length(table)), "fp.hashtable: a key stored outside the table");
 	return stored;
 }
 
 // wrapper: by-value entry point to the by-ref insertUnique that insert shares
-/// Inserts `key` without checking whether it is already present, so a duplicate is stored twice. Returns a pointer to the stored key, valid until the next insert, or null if the table could not make room, in which case it holds the same keys as before, though it may have grown. Either way the call takes over `key`'s lifetime: the copy made for it is moved into the table, or ended when it is not stored.
+/// Inserts `key` without checking whether it is already present, so a duplicate is stored twice.
+/// Returns a pointer to the stored key, valid until the next insert, or null if the table could not make room, in which case it holds the same keys as before, though it may have grown.
+/// Either way the call takes over `key`'s lifetime: the copy made for it is moved into the table, or ended when it is not stored.
 ///
 /// Examples:
 /// ---
@@ -390,9 +516,15 @@ T* insertNew(T)(ref T* table, T key) {
 pragma(inline, true)
 private size_t locate(T)(inout T* table, ref T key) @trusted {
 	fp.lifecycle.normalizePadding(key);
-	ubyte[] bytes = (cast(ubyte*) &key)[0 .. T.sizeof];
+	return locateBytes(table, (cast(ubyte*) &key)[0 .. T.sizeof]);
+}
+
+// Finds the slot holding a key equal to the one in `bytes`, whose padding is already normalized.
+private size_t locateBytes(T)(inout T* table, inout(ubyte)[] bytes) @trusted {
+	assert(bytes.length == T.sizeof, "fp.hashtable: a key of the wrong size");
 	// Null has no slots, so `computeHash` would divide by zero; a non-table's header is too small for this module's size to read.
 	if (!valid(table)) return fp.pointer.notFound;
+	assert(headerOf(table).config.neighborhoodSize <= maxNeighborhoodSize, "fp.hashtable: a neighborhood past its bound");
 	immutable hash = computeHash(table, bytes);
 	immutable hashInfo = *entryInfoAt(table, hash);
 	immutable config = headerOf(table).config;
@@ -401,7 +533,7 @@ private size_t locate(T)(inout T* table, ref T key) @trusted {
 	foreach (i; 0 .. config.neighborhoodSize) {
 		if ((hashInfo & (size_t(1) << i)) == 0) continue;
 		immutable probe = (hash + i) % fp.pointer.length(table);
-		if (!entryOccupied(table, probe)) continue;
+		assert(entryOccupied(table, probe), "fp.hashtable: a home lists an empty slot");
 		if (config.equalFunction(bytes, slots[probe * T.sizeof .. probe * T.sizeof + T.sizeof]))
 			return probe;
 	}
@@ -416,7 +548,8 @@ private size_t locateEndingCopy(T)(inout T* table, ref T copy) @trusted {
 }
 
 // wrapper: by-value entry point that hands locateEndingCopy the call's own copy
-/// The slot index holding `key`, or `fp.pointer.notFound`. The call takes over the lifetime of the copy made for it, leaving it empty; the caller's own key is left alone.
+/// The slot index holding `key`, or `fp.pointer.notFound`.
+/// The call takes over the lifetime of the copy made for it, leaving it empty; the caller's own key is left alone.
 ///
 /// Examples:
 /// ---
@@ -427,10 +560,15 @@ private size_t locateEndingCopy(T)(inout T* table, ref T copy) @trusted {
 /// assert(positionOf(table, 2) == fp.pointer.notFound);
 /// ---
 size_t positionOf(T)(inout T* table, const(T) key) @trusted {
-	return locateEndingCopy(table, *cast(T*)&key); // the call's own copy, so writing to it and ending it is safe
+	immutable position = locateEndingCopy(table, *cast(T*)&key); // the call's own copy, so writing to it and ending it is safe
+	assert(position == fp.pointer.notFound || position < fp.pointer.length(table), "fp.hashtable.positionOf: a slot past the table");
+	assert(position == fp.pointer.notFound || entryOccupied(table, position), "fp.hashtable.positionOf: an empty slot");
+	return position;
 }
 
-/// A pointer to the stored copy of `key`, valid until the next insert, or null if it is absent. Changing the key through it so that it hashes differently corrupts the table. The call takes over the lifetime of the copy made for it, leaving the caller's key alone.
+/// A pointer to the stored copy of `key`, valid until the next insert, or null if it is absent.
+/// Changing the key through it so that it hashes differently corrupts the table.
+/// The call takes over the lifetime of the copy made for it, leaving the caller's key alone.
 ///
 /// Examples:
 /// ---
@@ -442,10 +580,14 @@ size_t positionOf(T)(inout T* table, const(T) key) @trusted {
 /// ---
 T* find(T)(T* table, const(T) key) @trusted {
 	immutable position = locateEndingCopy(table, *cast(T*)&key); // the call's own copy, so writing to it and ending it is safe
+	assert(position == fp.pointer.notFound || position < fp.pointer.length(table), "fp.hashtable: found a slot past the table");
+	assert(position == fp.pointer.notFound || entryOccupied(table, position), "fp.hashtable: found an empty slot");
 	return position == fp.pointer.notFound ? null : table + position;
 }
 
-/// Finds `key`, inserting it if it is not already present. Returns a pointer to the stored key, valid until the next insert, or null if the table could not make room, in which case it holds the same keys as before, though it may have grown. Either way the call takes over `key`'s lifetime: the copy made for it is moved into the table, or ended when it is already there or cannot be stored.
+/// Finds `key`, inserting it if it is not already present.
+/// Returns a pointer to the stored key, valid until the next insert, or null if the table could not make room, in which case it holds the same keys as before, though it may have grown.
+/// Either way the call takes over `key`'s lifetime: the copy made for it is moved into the table, or ended when it is already there or cannot be stored.
 ///
 /// Examples:
 /// ---
@@ -457,11 +599,18 @@ T* find(T)(T* table, const(T) key) @trusted {
 /// ---
 T* insert(T)(ref T* table, T key) {
 	immutable position = locate(table, key); // the call's own copy, so reading it does not end anything the caller owns
-	if (position != fp.pointer.notFound) { fp.lifecycle.endLifetime(key); return table + position; }
-	return insertUnique(table, key);
+	if (position != fp.pointer.notFound) {
+		assert(entryOccupied(table, position), "fp.hashtable: found an empty slot");
+		fp.lifecycle.endLifetime(key);
+		return table + position;
+	}
+	T* stored = insertUnique(table, key);
+	assert(stored is null || locateBytes(table, (cast(ubyte*) stored)[0 .. T.sizeof]) == stored - table, "fp.hashtable: an inserted key cannot be found");
+	return stored;
 }
 
-/// Whether `key` is in the table. The call takes over the lifetime of the copy made for it, leaving the caller's key alone.
+/// Whether `key` is in the table.
+/// The call takes over the lifetime of the copy made for it, leaving the caller's key alone.
 ///
 /// Examples:
 /// ---
@@ -476,7 +625,8 @@ bool contains(T)(inout T* table, const(T) key) @trusted {
 }
 
 
-/// Finalizes and removes the key in slot `position` of table `table`, which must be occupied, clears its bit in its home slot's neighborhood, and leaves the slot empty. A `table` that is not a table is left alone, since this module's header does not fit in front of it.
+/// Finalizes and removes the key in slot `position` of table `table`, which must be occupied, clears its bit in its home slot's neighborhood, and leaves the slot empty.
+/// A `table` that is not a table is left alone, since this module's header does not fit in front of it.
 ///
 /// Examples:
 /// ---
@@ -488,7 +638,8 @@ bool contains(T)(inout T* table, const(T) key) @trusted {
 /// ---
 void removeAtPosition(T)(T* table, size_t position) @trusted {
 	if (!valid(cast(void*) table)) return;
-	assert(entryOccupied(table, position));
+	assert(position < fp.pointer.length(table), "fp.hashtable: removing a slot past the table");
+	assert(entryOccupied(table, position), "fp.hashtable: removing an empty slot");
 	ubyte* slots = cast(ubyte*) table;
 	ubyte[] key = slots[position * T.sizeof .. (position + 1) * T.sizeof];
 	// Hashed before finalizing, which may release what the hash function reads.
@@ -496,11 +647,13 @@ void removeAtPosition(T)(T* table, size_t position) @trusted {
 	if (headerOf(table).config.finalizer !is null)
 		headerOf(table).config.finalizer(key);
 	fp.lifecycle.emptySlots(cast(T*)(slots + position * T.sizeof), 1);
+	assert((*entryInfoAt(table, hash) & (size_t(1) << hashDistance(table, hash, position))) != 0, "fp.hashtable: a key its home did not list");
 	*entryInfoAt(table, hash) &= ~(size_t(1) << hashDistance(table, hash, position));
 	setEntryOccupied(table, position, false);
 }
 
-/// Removes the stored copy of `key`, finalizing it, if it is present. The call takes over the lifetime of the copy made for it, leaving the caller's own key alone.
+/// Removes the stored copy of `key`, finalizing it, if it is present.
+/// The call takes over the lifetime of the copy made for it, leaving the caller's own key alone.
 ///
 /// Examples:
 /// ---
@@ -513,12 +666,15 @@ void removeAtPosition(T)(T* table, size_t position) @trusted {
 /// ---
 void remove(T)(T* table, const(T) key) @trusted {
 	immutable position = locateEndingCopy(table, *cast(T*)&key); // the call's own copy, so writing to it and ending it is safe
-	if (position != fp.pointer.notFound)
-		removeAtPosition(table, position);
+	if (position == fp.pointer.notFound) return;
+	removeAtPosition(table, position);
+	assert(!entryOccupied(table, position), "fp.hashtable.remove: the key's slot is still occupied");
 }
 
 
-/// An input range over the occupied slots of a table, from `occupied`. It yields a pointer to each key, in slot order, mutable when the table is. Changing a key through it so that it hashes differently leaves the table unable to find it until `rehash`.
+/// An input range over the occupied slots of a table, from `occupied`.
+/// It yields a pointer to each key, in slot order, mutable when the table is.
+/// Changing a key through it so that it hashes differently leaves the table unable to find it until `rehash`.
 ///
 /// Examples:
 /// ---
@@ -546,9 +702,14 @@ struct HashtableIterator(T) {
 	/// ---
 	bool empty() const @trusted { return index >= fp.pointer.length(table); }
 	/// Ditto
-	T* front() { return table + index; }
+	T* front() {
+		assert(!empty, "fp.hashtable: front of a finished iteration");
+		assert(entryOccupied(cast(void*) table, index), "fp.hashtable: an iteration stopped on an empty slot");
+		return table + index;
+	}
 	/// Ditto
 	void popFront() @trusted {
+		assert(!empty, "fp.hashtable: popFront of a finished iteration");
 		// `cast(void*)`: for a struct `T`, `const(T)*` is not implicitly convertible to the helpers' `inout void*`.
 		do ++index;
 		while (!empty && !entryOccupied(cast(void*) table, index));
@@ -574,6 +735,7 @@ HashtableIterator!T occupied(T)(T* table) {
 	// A non-table has no slots to probe, so the range is empty rather than reading past a header too small for this module's.
 	if (!valid(cast(void*) table)) { keys.index = fp.pointer.length(cast(void*) table); return keys; }
 	if (!keys.empty && !entryOccupied(cast(void*) table, 0)) keys.popFront();
+	assert(keys.empty || entryOccupied(cast(void*) table, keys.index), "fp.hashtable.occupied: an iteration starting on an empty slot");
 	return keys;
 }
 
@@ -1052,10 +1214,9 @@ unittest {
 	ulong* churn = create!ulong();
 	assert(churn !is null);
 	scope(exit) free(churn);
-	uint seed = 1;
+	auto random = fp.algorithms.createRandom(1);
 	foreach (step; 0 .. 20 * n) {
-		seed = seed * 1103515245 + 12345;
-		immutable k = (seed >> 8) % n;
+		immutable k = fp.algorithms.randomBelow(random, n);
 		if (present[k] && step % 3 == 0) {
 			remove(churn, cast(ulong) k);
 			present[k] = false;
@@ -1063,10 +1224,20 @@ unittest {
 			assert(insert(churn, cast(ulong) k) !is null);
 			present[k] = true;
 		}
-		if (step % 512 == 0)
+		if (step % 512 == 0) {
+			assert(validate(churn));
 			foreach (size_t j; 0 .. n) assert(contains(churn, j) == present[j]);
+		}
 	}
 	foreach (size_t j; 0 .. n) assert(contains(churn, j) == present[j]);
+	assert(validate(churn) && validate(table) && validate!ulong(null));
+	int* array = null;
+	assert(fp.dynarray.pushBack(array, 1) && !validate(array));
+	fp.dynarray.free(array);
+	// A neighborhood bit naming an empty slot is caught.
+	*entryInfoAt(churn, 0) ^= 1;
+	assert(!validate(churn));
+	*entryInfoAt(churn, 0) ^= 1;
 }
 
 unittest { // occupied yields mutable keys for a mutable table; rehash finds them again after they change
@@ -1078,4 +1249,32 @@ unittest { // occupied yields mutable keys for a mutable table; rehash finds the
 	assert(contains(table, 10) && contains(table, 20) && contains(table, 30) && !contains(table, 1));
 	const(int)* view = table;
 	static assert(is(typeof(occupied(view).front()) == const(int)*));
+
+	// Keys rewritten to one value outnumber a neighborhood: a plain rehash cannot place them and leaves the table as it was; a distinct one keeps one and finalizes the rest.
+	static size_t count(int* t) {
+		size_t n = 0;
+		foreach (key; occupied(t)) ++n;
+		return n;
+	}
+	Config config;
+	config.finalizer = &countingFinalize;
+	int* crowded = create!int(config);
+	scope(exit) free(crowded);
+	immutable size_t many = 4 * config.neighborhoodSize;
+	foreach (i; 0 .. many) assert(insert(crowded, cast(int) i) !is null);
+	foreach (key; occupied(crowded)) *key = 5;
+	finalizeCallCount = 0;
+	assert(!rehash(crowded, 0) && count(crowded) == many && finalizeCallCount == 0);
+	foreach (budget; 0 .. 16) {
+		auto previous = fp.testing.limitAllocations(budget);
+		immutable rehashed = rehash(crowded, 0, true);
+		fp.testing.restoreAllocator(previous);
+		if (!rehashed) {
+			assert(count(crowded) == many && finalizeCallCount == 0);
+			continue;
+		}
+		assert(count(crowded) == 1 && contains(crowded, 5) && finalizeCallCount == many - 1 && validate(crowded));
+		break;
+	}
+	assert(count(crowded) == 1);
 }

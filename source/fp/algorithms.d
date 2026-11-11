@@ -1,6 +1,11 @@
 /// Algorithms over plain data: hashing bytes (`hashBytes`, MurmurHash3 and the default for `fp.hashtable`; `hashShortBytes`, FNV-1a; `combine`, for chaining a hash over several values), searching (`find`, `findIf`, `lowerBound`, `upperBound`, `findSorted`), sorting (`sortUnique`, `radixSort`, `applyPermutation`), and differences (`commonSubsequence`, Myers' O(ND) diff in linear space).
 ///
-/// They share conventions. Inputs are slices; pass a dynarray as `fp.dynarray.slice(array)`, except to a function that changes its length, which takes the dynarray first. An order is the template parameter `less`, `(a, b) => a < b` by default. A search returns an index or `fp.pointer.notFound`. Output that grows is appended to a dynarray passed last by `ref`, with a `bool` result; on failure it is left as it was. A hash is a `ulong`.
+/// They share conventions.
+/// Inputs are slices; pass a dynarray as `fp.dynarray.slice(array)`, except to a function that changes its length, which takes the dynarray first.
+/// An order is the template parameter `less`, `(a, b) => a < b` by default.
+/// A search returns an index or `fp.pointer.notFound`.
+/// Output that grows is appended to a dynarray passed last by `ref`, with a `bool` result; on failure it is left as it was.
+/// A hash is a `ulong`.
 ///
 /// Comparison sorting, `isSorted` and `reverse` are `std.algorithm`'s, which work under `-betterC`; these cover what they do not.
 ///
@@ -35,7 +40,9 @@ version(unittest) static import fp.testing;
 /// The hash `combine` chains start from: the FNV-1a offset basis, so a chain of `combine` over bytes computes FNV-1a.
 enum ulong chainStart = 14695981039346656037UL;
 
-/// The 64-bit FNV-1a hash of the bytes of `data`, a slice of scalars, matching reference FNV-1a values on every host. It reads one byte at a time, so it suits short inputs; use `hashBytes` for long ones. It cannot fail.
+/// The 64-bit FNV-1a hash of the bytes of `data`, a slice of scalars, matching reference FNV-1a values on every host.
+/// It reads one byte at a time, so it suits short inputs; use `hashBytes` for long ones.
+/// It cannot fail.
 ///
 /// Examples:
 /// ---
@@ -55,25 +62,32 @@ ulong hashShortBytes(T)(const(T)[] data) @trusted if (__traits(isScalar, T)) {
 	return hash;
 }
 
-/// Folds `value` into `hash`, one FNV-1a step over a whole word rather than a byte, for a hash chained over several values. A multiply carries bits only upward, so high bits of `value` never reach the low bits of the result; pass the result through `hashBytes` if they must. It cannot fail.
+/// Folds `value` into `hash`, one FNV-1a step over a whole word rather than a byte, for a hash chained over several values.
+/// A multiply carries bits only upward, so high bits of `value` never reach the low bits of the result; pass the result through `hashBytes` if they must.
+/// It cannot fail.
 ///
 /// Examples:
 /// ---
 /// assert(combine(combine(0, 1), 2) != combine(combine(0, 2), 1));
 /// ---
+pragma(inline, true)
 ulong combine(ulong hash, ulong value) {
 	enum ulong prime = 1099511628211UL;
 	return (hash ^ value) * prime;
 }
 
 // Reads up to eight bytes as a little-endian word, zero-extended, whatever the host's byte order.
+pragma(inline, true)
 private ulong loadLittleEndian(const(ubyte)[] bytes) @trusted {
+	assert(bytes.length <= ulong.sizeof, "fp.algorithms: more bytes than a word holds");
+	assert(bytes.ptr !is null || bytes.length == 0, "fp.algorithms: bytes with a length but no address");
 	ulong word = 0;
 	core.stdc.string.memcpy(&word, bytes.ptr, bytes.length);
 	version(BigEndian) word = core.bitop.bswap(word);
 	return word;
 }
 
+pragma(inline, true)
 private ulong finalMix(ulong k) {
 	k ^= k >> 33;
 	k *= 0xff51afd7ed558ccd;
@@ -82,7 +96,9 @@ private ulong finalMix(ulong k) {
 	return k ^ (k >> 33);
 }
 
-/// The first 64 bits of MurmurHash3_x64_128 of the bytes of `data`, a slice of scalars, with `seed`, matching the reference implementation on every host. It reads sixteen bytes at a time, so it is faster than `hashShortBytes` over long inputs, and its result is well mixed in its top bits as well as its bottom ones. It cannot fail.
+/// The first 64 bits of MurmurHash3_x64_128 of the bytes of `data`, a slice of scalars, with `seed`, matching the reference implementation on every host.
+/// It reads sixteen bytes at a time, so it is faster than `hashShortBytes` over long inputs, and its result is well mixed in its top bits as well as its bottom ones.
+/// It cannot fail.
 ///
 /// Examples:
 /// ---
@@ -98,6 +114,7 @@ ulong hashBytes(T)(const(T)[] data, uint seed = 0) @trusted if (__traits(isScala
 
 	ulong h1 = seed, h2 = seed;
 	immutable tailStart = bytes.length & ~size_t(15);
+	assert(tailStart <= bytes.length && bytes.length - tailStart < 16, "fp.algorithms: a tail longer than a block");
 	for (size_t i = 0; i < tailStart; i += 16) {
 		immutable k1 = core.bitop.rol(loadLittleEndian(bytes[i .. i + 8]) * c1, 31) * c2;
 		h1 = (core.bitop.rol(h1 ^ k1, 27) + h2) * 5 + 0x52dce729;
@@ -155,11 +172,164 @@ unittest { // lengths around a word apart differ, as do inputs differing only pa
 }
 
 
+// === random numbers ============================================================
+
+/// A seeded pseudo-random generator (xoshiro256**), for tests and simulations that replay from a seed.
+/// It is not for secrets: its output is predictable.
+/// Make one with `createRandom`; a default-initialized one is all zeros and only ever yields zero.
+///
+/// Examples:
+/// ---
+/// Random a = createRandom(7), b = createRandom(7);
+/// assert(nextRandom(a) == nextRandom(b));
+/// ---
+struct Random {
+	ulong[4] state;
+}
+
+/// A generator whose sequence `seed` alone decides, the same on every platform.
+/// Every seed, zero included, gives a usable one (SplitMix64 fills the state).
+///
+/// Examples:
+/// ---
+/// Random random = createRandom(0);
+/// assert(nextRandom(random) == 0x99EC5F36CB75F2B4);
+/// ---
+Random createRandom(ulong seed) {
+	Random random;
+	foreach (ref word; random.state) {
+		seed += 0x9E3779B97F4A7C15;
+		ulong mixed = seed;
+		mixed = (mixed ^ (mixed >> 30)) * 0xBF58476D1CE4E5B9;
+		mixed = (mixed ^ (mixed >> 27)) * 0x94D049BB133111EB;
+		word = mixed ^ (mixed >> 31);
+	}
+	// xoshiro256** never leaves the all-zero state, so a seed that reached it would give only zeros.
+	assert((random.state[0] | random.state[1] | random.state[2] | random.state[3]) != 0, "fp.algorithms: a seed reached the all-zero state");
+	return random;
+}
+
+/// The next 64 bits of `random`'s sequence.
+///
+/// Examples:
+/// ---
+/// Random random = createRandom(1);
+/// assert(nextRandom(random) != nextRandom(random));
+/// ---
+ulong nextRandom(ref Random random) {
+	assert((random.state[0] | random.state[1] | random.state[2] | random.state[3]) != 0, "fp.algorithms: a Random not made by createRandom");
+	immutable result = core.bitop.rol(random.state[1] * 5, 7) * 9;
+	immutable shifted = random.state[1] << 17;
+	random.state[2] ^= random.state[0];
+	random.state[3] ^= random.state[1];
+	random.state[1] ^= random.state[2];
+	random.state[0] ^= random.state[3];
+	random.state[2] ^= shifted;
+	random.state[3] = core.bitop.rol(random.state[3], 45);
+	assert((random.state[0] | random.state[1] | random.state[2] | random.state[3]) != 0, "fp.algorithms: the generator reached the all-zero state");
+	return result;
+}
+
+/// A number from 0 up to but not including `n`, each equally likely; `n` must not be zero.
+///
+/// Examples:
+/// ---
+/// Random random = createRandom(1);
+/// assert(randomBelow(random, 6) < 6);
+/// ---
+size_t randomBelow(ref Random random, size_t n) {
+	assert(n != 0, "fp.algorithms.randomBelow: there is no number below zero to pick");
+	// The lowest `2^64 % n` values are rejected so every remainder is as likely; a draw is kept more often than not.
+	immutable ulong rejected = (0 - cast(ulong) n) % n;
+	assert(rejected < n, "fp.algorithms.randomBelow: rejecting a whole range of draws");
+	for (;;) {
+		immutable drawn = nextRandom(random);
+		if (drawn < rejected) continue;
+		assert(drawn % n < n, "fp.algorithms.randomBelow: a draw at or above the bound");
+		return cast(size_t) (drawn % n);
+	}
+}
+
+/// True `numerator` times in `denominator`, which must not be zero or less than `numerator`.
+///
+/// Examples:
+/// ---
+/// Random random = createRandom(1);
+/// assert(randomChance(random, 1, 1) && !randomChance(random, 0, 4));
+/// ---
+bool randomChance(ref Random random, size_t numerator, size_t denominator) {
+	assert(numerator <= denominator, "fp.algorithms.randomChance: a chance cannot be more than certain");
+	assert(denominator > 0, "fp.algorithms.randomChance: a chance out of nothing");
+	return randomBelow(random, denominator) < numerator;
+}
+
+/// A number from 0 to 1, both included, drawn from 2^53 evenly spaced values so every one is exactly representable as a `double`.
+///
+/// Examples:
+/// ---
+/// Random random = createRandom(1);
+/// immutable fraction = randomFraction(random);
+/// assert(fraction >= 0 && fraction <= 1);
+/// ---
+double randomFraction(ref Random random) {
+	enum mantissaBits = double.mant_dig;
+	enum ulong largest = (1UL << mantissaBits) - 1;
+	immutable drawn = nextRandom(random) >> (64 - mantissaBits);
+	assert(drawn <= largest, "fp.algorithms.randomFraction: a draw wider than a double's mantissa");
+	immutable fraction = cast(double) drawn / cast(double) largest;
+	assert(fraction >= 0 && fraction <= 1, "fp.algorithms.randomFraction: a fraction outside [0, 1]");
+	return fraction;
+}
+
+unittest { // the reference sequence; seeds decide the sequence; every number below a bound turns up, none at or above it; chances at both ends and between; fractions spread over [0, 1]
+	Random random = createRandom(0);
+	assert(random.state[0] == 0xE220A8397B1DCDAF);
+	assert(nextRandom(random) == 0x99EC5F36CB75F2B4 && nextRandom(random) == 0xBF6E1F784956452A);
+
+	Random same = createRandom(0), other = createRandom(1);
+	cast(void) nextRandom(same);
+	cast(void) nextRandom(same);
+	assert(nextRandom(same) == nextRandom(random) && nextRandom(same) != nextRandom(other));
+
+	size_t[7] seen;
+	foreach (i; 0 .. 7000) ++seen[randomBelow(random, 7)];
+	foreach (count; seen) assert(count > 800 && count < 1200);
+	foreach (i; 0 .. 100) assert(randomBelow(random, 1) == 0);
+	assert(randomBelow(random, size_t.max) < size_t.max);
+
+	size_t hits = 0;
+	foreach (i; 0 .. 4000) {
+		assert(randomChance(random, 3, 3) && !randomChance(random, 0, 3));
+		hits += randomChance(random, 1, 4);
+	}
+	assert(hits > 800 && hits < 1200);
+
+	size_t[10] tenths;
+	double sum = 0;
+	foreach (i; 0 .. 10_000) {
+		immutable fraction = randomFraction(random);
+		assert(fraction >= 0 && fraction <= 1);
+		++tenths[fraction == 1 ? 9 : cast(size_t) (fraction * 10)];
+		sum += fraction;
+	}
+	foreach (count; tenths) assert(count > 850 && count < 1150);
+	assert(sum / 10_000 > 0.48 && sum / 10_000 < 0.52);
+
+	// nextRandom returns rol(state[1] * 5, 7) * 9, so inverting 5 and 9 mod 2^64 picks the state giving each endpoint.
+	ulong inverse(ulong odd) { ulong x = odd; foreach (i; 0 .. 6) x *= 2 - odd * x; return x; }
+	Random lowest = createRandom(0), highest = createRandom(0);
+	lowest.state[1] = 0;
+	highest.state[1] = core.bitop.ror(ulong.max * inverse(9), 7) * inverse(5);
+	assert(randomFraction(lowest) == 0 && randomFraction(highest) == 1);
+}
+
+
 // === searching =================================================================
 
 // --- linear --------------------------------------------------------------------
 
-/// The index of the first element of `values` equal (`fp.lifecycle.equal`) to `value`, or `fp.pointer.notFound`. O(n); it cannot fail.
+/// The index of the first element of `values` equal (`fp.lifecycle.equal`) to `value`, or `fp.pointer.notFound`.
+/// O(n); it cannot fail.
 ///
 /// Examples:
 /// ---
@@ -168,12 +338,14 @@ unittest { // lengths around a word apart differ, as do inputs differing only pa
 /// assert(find(values[], 2) == 1 && find(values[], 5) == fp.pointer.notFound);
 /// ---
 size_t find(T)(const(T)[] values, auto ref const T value) {
+	assert(values.length < fp.pointer.allocationRefused, "fp.algorithms.find: an index could be read as a sentinel");
 	foreach (i, ref element; values)
 		if (fp.lifecycle.equal(element, value)) return i;
 	return fp.pointer.notFound;
 }
 
-/// The index of the first element of `values` for which `predicate` returns true, or `fp.pointer.notFound`. O(n); it cannot fail.
+/// The index of the first element of `values` for which `predicate` returns true, or `fp.pointer.notFound`.
+/// O(n); it cannot fail.
 ///
 /// Examples:
 /// ---
@@ -182,13 +354,15 @@ size_t find(T)(const(T)[] values, auto ref const T value) {
 /// assert(findIf!(x => x > 5)(values[]) == 2 && findIf!(x => x > 9)(values[]) == fp.pointer.notFound);
 /// ---
 size_t findIf(alias predicate, T)(const(T)[] values) {
+	assert(values.length < fp.pointer.allocationRefused, "fp.algorithms.findIf: an index could be read as a sentinel");
 	foreach (i, ref element; values)
 		if (predicate(element)) return i;
 	return fp.pointer.notFound;
 }
 
 // wrapper: container vocabulary every reader knows
-/// Whether `values` holds an element equal (`fp.lifecycle.equal`) to `value`. O(n); it cannot fail.
+/// Whether `values` holds an element equal (`fp.lifecycle.equal`) to `value`.
+/// O(n); it cannot fail.
 ///
 /// Examples:
 /// ---
@@ -202,7 +376,9 @@ bool contains(T)(const(T)[] values, auto ref const T value) {
 
 // --- sorted --------------------------------------------------------------------
 
-/// The index of the first element of `sorted` for which `less(element, key)` is false, `sorted.length` if there is none: where `key` would be inserted before any equal elements to keep `sorted` in order. `sorted` must be ordered by `less`. O(log n); it cannot fail.
+/// The index of the first element of `sorted` for which `less(element, key)` is false, `sorted.length` if there is none: where `key` would be inserted before any equal elements to keep `sorted` in order.
+/// `sorted` must be ordered by `less`.
+/// O(log n); it cannot fail.
 ///
 /// Examples:
 /// ---
@@ -218,10 +394,14 @@ size_t lowerBound(alias less = (a, b) => a < b, T, K)(const(T)[] sorted, auto re
 		if (less(sorted[middle], key)) low = middle + 1;
 		else high = middle;
 	}
+	assert(low == sorted.length || !less(sorted[low], key), "fp.algorithms.lowerBound: stopped before the key; is the slice sorted by `less`?");
+	assert(low == 0 || less(sorted[low - 1], key), "fp.algorithms.lowerBound: stopped past the key; is the slice sorted by `less`?");
 	return low;
 }
 
-/// The index of the first element of `sorted` for which `less(key, element)` is true, `sorted.length` if there is none: where `key` would be inserted after any equal elements to keep `sorted` in order. `sorted` must be ordered by `less`, which here takes the key first. O(log n); it cannot fail.
+/// The index of the first element of `sorted` for which `less(key, element)` is true, `sorted.length` if there is none: where `key` would be inserted after any equal elements to keep `sorted` in order.
+/// `sorted` must be ordered by `less`, which here takes the key first.
+/// O(log n); it cannot fail.
 ///
 /// Examples:
 /// ---
@@ -235,10 +415,14 @@ size_t upperBound(alias less = (a, b) => a < b, T, K)(const(T)[] sorted, auto re
 		if (less(key, sorted[middle])) high = middle;
 		else low = middle + 1;
 	}
+	assert(low == sorted.length || less(key, sorted[low]), "fp.algorithms.upperBound: stopped before the key; is the slice sorted by `less`?");
+	assert(low == 0 || !less(key, sorted[low - 1]), "fp.algorithms.upperBound: stopped past the key; is the slice sorted by `less`?");
 	return low;
 }
 
-/// The index of the first element of `sorted` equivalent to `key` under `less` (neither orders before the other), or `fp.pointer.notFound`. `sorted` must be ordered by `less`, which is called both ways round, element first and key first. O(log n); it cannot fail.
+/// The index of the first element of `sorted` equivalent to `key` under `less` (neither orders before the other), or `fp.pointer.notFound`.
+/// `sorted` must be ordered by `less`, which is called both ways round, element first and key first.
+/// O(log n); it cannot fail.
 ///
 /// Examples:
 /// ---
@@ -248,6 +432,7 @@ size_t upperBound(alias less = (a, b) => a < b, T, K)(const(T)[] sorted, auto re
 /// ---
 size_t findSorted(alias less = (a, b) => a < b, T, K)(const(T)[] sorted, auto ref const K key) {
 	immutable at = lowerBound!less(sorted, key);
+	assert(at <= sorted.length, "fp.algorithms.findSorted: a bound past the slice");
 	return at < sorted.length && !less(key, sorted[at]) ? at : fp.pointer.notFound;
 }
 
@@ -285,7 +470,8 @@ unittest { // linear searches through lifetimes' equality; bounds at both ends a
 
 // === sorting ===================================================================
 
-/// Sorts the dynarray `array` by `less` and drops all but the first of each run of elements `less` cannot tell apart, keeping its capacity. It cannot fail.
+/// Sorts the dynarray `array` by `less` and drops all but the first of each run of elements `less` cannot tell apart, keeping its capacity.
+/// It cannot fail.
 ///
 /// Examples:
 /// ---
@@ -301,12 +487,17 @@ unittest { // linear searches through lifetimes' equality; bounds at both ends a
 void sortUnique(alias less = (a, b) => a < b, T)(T* array) {
 	std.algorithm.sorting.sort!less(fp.dynarray.slice(array));
 	cast(void) fp.dynarray.unique!((kept, element) => !less(kept, element))(array);
+	foreach (i; 1 .. fp.dynarray.length(array))
+		assert(less(array[i - 1], array[i]), "fp.algorithms.sortUnique: left elements out of order or repeated");
 }
 
 /// The most bits `radixSort` sorts in one pass, so its counting table holds `1 << radixDigitBits` entries.
 enum size_t radixDigitBits = 12;
 
-/// Sorts `keys`, unsigned integers each below `1 << bits`, by an LSD radix sort in as few passes of at most `radixDigitBits` bits as cover them, skipping a pass whose digit every key shares. `buffer` must be as long as `keys`; the passes alternate between the two. Returns whichever of `keys` and `buffer` holds the sorted result. O(n * bits / radixDigitBits), so faster than a comparison sort for many keys of few bits; it cannot fail.
+/// Sorts `keys`, unsigned integers each below `1 << bits`, by an LSD radix sort in as few passes of at most `radixDigitBits` bits as cover them, skipping a pass whose digit every key shares.
+/// `buffer` must be as long as `keys`; the passes alternate between the two.
+/// Returns whichever of `keys` and `buffer` holds the sorted result.
+/// O(n * bits / radixDigitBits), so faster than a comparison sort for many keys of few bits; it cannot fail.
 ///
 /// Examples:
 /// ---
@@ -320,6 +511,7 @@ T[] radixSort(T)(T[] keys, T[] buffer, size_t bits) if (__traits(isUnsigned, T))
 	if (bits == 0 || keys.length == 0) return keys;
 	immutable passes = (bits + radixDigitBits - 1) / radixDigitBits;
 	immutable digit = (bits + passes - 1) / passes;
+	assert(digit <= radixDigitBits && digit * passes >= bits, "fp.algorithms.radixSort: digits that do not cover the keys");
 	immutable size_t mask = (size_t(1) << digit) - 1;
 	size_t[1 << radixDigitBits] counts;
 	auto from = keys, to = buffer;
@@ -339,13 +531,15 @@ T[] radixSort(T)(T[] keys, T[] buffer, size_t bits) if (__traits(isUnsigned, T))
 		from = to;
 		to = swap;
 	}
+	foreach (i; 1 .. from.length) assert(from[i - 1] <= from[i], "fp.algorithms.radixSort: left keys out of order; are they wider than `bits`?");
 	return from;
 }
 
 
 // --- permutations ----------------------------------------------------------------
 
-/// Walks the cycles of the permutation `order`, handing each transposition it needs to `swapPair`, so a caller can permute storage it alone knows how to swap. `order[i]` is the index of whatever ends up at `i`, not where `i` goes.
+/// Walks the cycles of the permutation `order`, handing each transposition it needs to `swapPair`, so a caller can permute storage it alone knows how to swap.
+/// `order[i]` is the index of whatever ends up at `i`, not where `i` goes.
 ///
 /// Returns false, calling `swapPair` never, if its scratch buffer cannot be allocated.
 ///
@@ -360,13 +554,20 @@ bool applyPermutation(const(size_t)[] order, scope void delegate(size_t, size_t)
 	immutable n = order.length;
 	if (n <= 1) return true;
 
+	assert(n <= size_t.max / size_t.sizeof, "fp.algorithms.applyPermutation: an order longer than memory holds");
 	auto swaps = cast(size_t*) fp.pointer.allocator(null, n * size_t.sizeof);
 	if (swaps is null) return false;
 	scope(exit) cast(void) fp.pointer.allocator(swaps, 0);
-	foreach (i; 0 .. n) swaps[order[i]] = i;
+	version(assert) foreach (i; 0 .. n) swaps[i] = n; // unwritten, so a repeated position shows
+	foreach (i; 0 .. n) {
+		assert(order[i] < n, "fp.algorithms.applyPermutation: an order naming a position past its end");
+		assert(swaps[order[i]] == n, "fp.algorithms.applyPermutation: an order naming a position twice");
+		swaps[order[i]] = i;
+	}
 
 	foreach (i; 0 .. n)
 		while (swaps[i] != i) {
+			assert(swaps[i] < n, "fp.algorithms.applyPermutation: the order is not a permutation");
 			swapPair(swaps[i], i);
 			immutable t = swaps[swaps[i]];
 			swaps[swaps[i]] = swaps[i];
@@ -394,10 +595,9 @@ unittest { // sorts by other orders; radix sorts of several passes and of narrow
 	assert(fp.dynarray.slice(plain) == [1, 3]);
 
 	ulong[600] keys, buffer, expected;
-	uint seed = 7;
+	Random random = createRandom(7);
 	foreach (i, ref key; keys) {
-		seed = seed * 1103515245 + 12345;
-		key = (cast(ulong) seed << 13) & ((1UL << 40) - 1);
+		key = nextRandom(random) & ((1UL << 40) - 1);
 		expected[i] = key;
 	}
 	std.algorithm.sorting.sort(expected[]);
@@ -432,6 +632,8 @@ private Split bisect(T)(const(T)[] a, const(T)[] b, size_t halfBudget, ref bool 
 	immutable ptrdiff_t n = a.length, m = b.length;
 	immutable ptrdiff_t limit = (n + m + 1) / 2 < cast(ptrdiff_t) halfBudget ? (n + m + 1) / 2 : cast(ptrdiff_t) halfBudget;
 	immutable ptrdiff_t offset = limit + 1, width = 2 * limit + 3;
+	assert(n > 0 && m > 0 && a[0] != b[0] && a[$ - 1] != b[$ - 1], "fp.algorithms: bisecting sequences that share an end");
+	assert(limit >= 0 && limit <= (n + m + 1) / 2, "fp.algorithms: a search limit past the edit distance's bound");
 	ptrdiff_t* forward = null, backward = null;
 	scope(exit) {
 		fp.dynarray.free(forward);
@@ -482,8 +684,13 @@ private Split bisect(T)(const(T)[] a, const(T)[] b, size_t halfBudget, ref bool 
 	return Split.init;
 }
 
+// How deep `align_` can go: each split halves the edits left, and two sequences differ by fewer edits than a `size_t` can count twice over.
+private enum size_t maxAlignDepth = 8 * size_t.sizeof + 2;
+
+// bounded: maxAlignDepth
 // Appends the common pairs of `a` and `b`, which start at `aStart` and `bStart` in the whole sequences.
-private bool align_(T)(const(T)[] a, const(T)[] b, size_t aStart, size_t bStart, size_t halfBudget, ref size_t[2]* pairs) {
+private bool align_(T)(const(T)[] a, const(T)[] b, size_t aStart, size_t bStart, size_t halfBudget, ref size_t[2]* pairs, size_t depth = 0) {
+	assert(depth <= maxAlignDepth, "fp.algorithms.commonSubsequence: a split that did not halve the edits");
 	size_t prefix = 0;
 	for (; prefix < a.length && prefix < b.length && a[prefix] == b[prefix]; ++prefix)
 		if (!fp.dynarray.pushBack(pairs, cast(size_t[2]) [aStart + prefix, bStart + prefix])) return false;
@@ -496,8 +703,9 @@ private bool align_(T)(const(T)[] a, const(T)[] b, size_t aStart, size_t bStart,
 		immutable split = bisect(middleA, middleB, halfBudget, refused);
 		if (refused) return false;
 		if (split.found) {
-			if (!align_(middleA[0 .. split.x], middleB[0 .. split.y], aStart + prefix, bStart + prefix, halfBudget, pairs)) return false;
-			if (!align_(middleA[split.x .. $], middleB[split.y .. $], aStart + prefix + split.x, bStart + prefix + split.y, halfBudget, pairs)) return false;
+			assert(split.x <= middleA.length && split.y <= middleB.length, "fp.algorithms.commonSubsequence: a split past the sequences");
+			if (!align_(middleA[0 .. split.x], middleB[0 .. split.y], aStart + prefix, bStart + prefix, halfBudget, pairs, depth + 1)) return false;
+			if (!align_(middleA[split.x .. $], middleB[split.y .. $], aStart + prefix + split.x, bStart + prefix + split.y, halfBudget, pairs, depth + 1)) return false;
 		}
 	}
 
@@ -506,7 +714,8 @@ private bool align_(T)(const(T)[] a, const(T)[] b, size_t aStart, size_t bStart,
 	return true;
 }
 
-/// Appends to `pairs`, in increasing order, the index pairs `[i, j]` of a longest common subsequence of `a` and `b`: `a[i] == b[j]` for each, and no longer list of such pairs exists. A common first and last run is always matched; between them, if `a` and `b` differ by more than about `maxEdits` insertions and deletions, the middle is left unmatched rather than searched further.
+/// Appends to `pairs`, in increasing order, the index pairs `[i, j]` of a longest common subsequence of `a` and `b`: `a[i] == b[j]` for each, and no longer list of such pairs exists.
+/// A common first and last run is always matched; between them, if `a` and `b` differ by more than about `maxEdits` insertions and deletions, the middle is left unmatched rather than searched further.
 ///
 /// Returns false if an allocation was refused, leaving `pairs` as it was.
 ///
@@ -521,7 +730,13 @@ private bool align_(T)(const(T)[] a, const(T)[] b, size_t aStart, size_t bStart,
 bool commonSubsequence(T)(const(T)[] a, const(T)[] b, size_t maxEdits, ref size_t[2]* pairs) {
 	immutable wasNull = pairs is null;
 	immutable before = fp.dynarray.length(pairs);
-	if (align_(a, b, 0, 0, maxEdits / 2 + 1, pairs)) return true;
+	if (align_(a, b, 0, 0, maxEdits / 2 + 1, pairs)) {
+		immutable found = fp.dynarray.length(pairs) - before;
+		assert(found <= a.length && found <= b.length, "fp.algorithms.commonSubsequence: more pairs than elements");
+		foreach (i; before + 1 .. fp.dynarray.length(pairs))
+			assert(pairs[i][0] > pairs[i - 1][0] && pairs[i][1] > pairs[i - 1][1], "fp.algorithms.commonSubsequence: pairs out of order");
+		return true;
+	}
 	if (wasNull) fp.dynarray.free(pairs);
 	else cast(void) fp.dynarray.removeLast(pairs, fp.dynarray.length(pairs) - before);
 	return false;
@@ -550,13 +765,12 @@ version(unittest) {
 }
 
 unittest { // optimal on random inputs; empty sides; the budget; refusals
-	uint seed = 3;
+	Random random = createRandom(3);
 	foreach (round; 0 .. 400) {
 		ubyte[32] a, b;
-		seed = seed * 1103515245 + 12345;
-		immutable n = (seed >> 8) % 33, m = (seed >> 16) % 33;
-		foreach (i; 0 .. n) { seed = seed * 1103515245 + 12345; a[i] = cast(ubyte)((seed >> 12) % 4); }
-		foreach (i; 0 .. m) { seed = seed * 1103515245 + 12345; b[i] = cast(ubyte)((seed >> 12) % 4); }
+		immutable n = randomBelow(random, 33), m = randomBelow(random, 33);
+		foreach (i; 0 .. n) a[i] = cast(ubyte) randomBelow(random, 4);
+		foreach (i; 0 .. m) b[i] = cast(ubyte) randomBelow(random, 4);
 		size_t[2]* pairs = null;
 		scope(exit) fp.dynarray.free(pairs);
 		assert(commonSubsequence(a[0 .. n], b[0 .. m], 1000, pairs));

@@ -1,4 +1,5 @@
-/// The fat pointer core. A fat pointer is a plain `T*` with a `Header` stored just before its first element, recording how the memory was allocated and how many elements it holds, and a zero byte just after its last element, so a `char*` is also a valid C string.
+/// The fat pointer core.
+/// A fat pointer is a plain `T*` with a `Header` stored just before its first element, recording how the memory was allocated and how many elements it holds, and a zero byte just after its last element, so a `char*` is also a valid C string.
 ///
 /// Examples:
 /// ---
@@ -25,7 +26,8 @@ version(DigitalMars) {
 }
 
 
-/// Signature of the function that allocates, reallocates and frees the raw memory behind every libfp container. Its semantics mirror C's `realloc`:
+/// Signature of the function that allocates, reallocates and frees the raw memory behind every libfp container.
+/// Its semantics mirror C's `realloc`:
 /// $(UL
 ///   $(LI `p is null && size > 0`: allocate new memory.)
 ///   $(LI `p !is null && size > 0`: reallocate, preserving existing data.)
@@ -35,7 +37,8 @@ version(DigitalMars) {
 /// The memory it returns must be aligned to `maxAlignment`, as C's `malloc`'s is.
 alias Allocator = void* function(void* p, size_t size) @nogc nothrow;
 
-/// The allocator every libfp container uses. Reassign it to plug in your own, and restore the previous one when done.
+/// The allocator every libfp container uses.
+/// Reassign it to plug in your own, and restore the previous one when done.
 ///
 /// Examples:
 /// ---
@@ -70,7 +73,8 @@ private void* defaultAllocator(void* p, size_t size) @nogc nothrow {
 private enum ushort validityMask = 0xFF00;
 private enum ushort validityTag = 0xFE00;
 
-/// How a fat pointer's memory was allocated, as recorded in its `Header`. Every tag shares the high byte `validityTag`, so `valid` can reject memory that was never a fat pointer.
+/// How a fat pointer's memory was allocated, as recorded in its `Header`.
+/// Every tag shares the high byte `validityTag`, so `valid` can reject memory that was never a fat pointer.
 enum PointerType : ushort {
 	none = 0, /// Not a fat pointer (or null).
 	heap = validityTag | 0xFE, /// From `allocate` or `resize`.
@@ -79,7 +83,8 @@ enum PointerType : ushort {
 	hashTable = validityTag | 0xFC, /// An `fp.hashtable`.
 }
 
-/// The bookkeeping stored immediately before a fat pointer's first element. The containers built on fat pointers extend it by nesting it at the end of a larger header of their own.
+/// The bookkeeping stored immediately before a fat pointer's first element.
+/// The containers built on fat pointers extend it by nesting it at the end of a larger header of their own.
 struct Header {
 	PointerType type; /// How the memory was allocated.
 	size_t size; /// The number of elements (not bytes).
@@ -95,7 +100,8 @@ struct Header {
 /// ---
 enum size_t maxAlignment = 2 * size_t.sizeof;
 
-/// The padding that, put in front of a header of `bytes` bytes, makes it a whole number of `maxAlignment`s, so the elements just after it are aligned. Every header goes at the front, so the fields that end it stay adjacent to the elements.
+/// The padding that, put in front of a header of `bytes` bytes, makes it a whole number of `maxAlignment`s, so the elements just after it are aligned.
+/// Every header goes at the front, so the fields that end it stay adjacent to the elements.
 ///
 /// Examples:
 /// ---
@@ -115,13 +121,15 @@ enum size_t prefixBytes = headerPadding!(Header.sizeof) + Header.sizeof;
 /// Returned by every search in libfp when nothing matched.
 enum size_t notFound = size_t.max;
 
-/// Returned in place of an index by functions that return one, when an allocation they needed was refused. Like `notFound`, it is never a valid index.
+/// Returned in place of an index by functions that return one, when an allocation they needed was refused.
+/// Like `notFound`, it is never a valid index.
 enum size_t allocationRefused = notFound - 1;
 
 
 // `headerOf`, `valid` and `length` force inlining: callers in other dub packages cannot inline them without LTO, and `length` is hot.
 
-/// The `Header` in front of fat pointer `p`. `p` must not be null.
+/// The `Header` in front of fat pointer `p`.
+/// `p` must not be null.
 ///
 /// Examples:
 /// ---
@@ -132,6 +140,8 @@ enum size_t allocationRefused = notFound - 1;
 /// ---
 pragma(inline, true)
 package inout(Header)* headerOf(inout void* p) @trusted {
+	assert(p !is null, "fp.pointer: null has no header");
+	assert(cast(size_t) p > Header.sizeof, "fp.pointer: a header before the start of memory");
 	return cast(inout(Header)*)(cast(const(ubyte)*) p - Header.sizeof);
 }
 
@@ -161,7 +171,8 @@ version(WASI) {
 	}
 }
 
-/// The container header of type `H` in front of fat pointer `p`, for the containers that extend `Header` with one of their own. For null it returns a zeroed dummy of the calling thread's own, so every query on a null container reads as empty rather than faulting, on any number of threads at once; writes to the dummy are discarded by the next call.
+/// The container header of type `H` in front of fat pointer `p`, for the containers that extend `Header` with one of their own.
+/// For null it returns a zeroed dummy of the calling thread's own, so every query on a null container reads as empty rather than faulting, on any number of threads at once; writes to the dummy are discarded by the next call.
 ///
 /// Examples:
 /// ---
@@ -174,10 +185,13 @@ package H* containerHeaderOf(H)(inout void* p) @trusted {
 		*dummy = H.init;
 		return dummy;
 	}
+	assert((cast(ushort) headerOf(p).type & validityMask) == validityTag, "fp.pointer: a container header for something that is not a fat pointer");
+	assert(H.sizeof >= Header.sizeof + size_t.sizeof, "fp.pointer: a container header holds a capacity in front of the fat pointer header");
 	return cast(H*)(cast(const(ubyte)*) p - H.sizeof);
 }
 
-/// Whether `p` is a live fat pointer of any kind. A dynarray or hash table that has capacity but no elements yet is valid; any other empty one is not.
+/// Whether `p` is a live fat pointer of any kind.
+/// A dynarray or hash table that has capacity but no elements yet is valid; any other empty one is not.
 ///
 /// Examples:
 /// ---
@@ -209,6 +223,7 @@ bool valid(inout void* p) @trusted {
 /// ---
 PointerType pointerType(inout void* p) {
 	if (p is null) return PointerType.none;
+	assert((cast(ushort) headerOf(p).type & validityMask) == validityTag, "fp.pointer: the type of something that is not a fat pointer");
 	return headerOf(p).type;
 }
 
@@ -223,17 +238,18 @@ bool onStack(inout void* p) {
 	return pointerType(p) == PointerType.stack;
 }
 
-/// Whether `p` lives on the heap (`allocate`, `resize`, or a dynarray).
+/// Whether `p` lives on the heap (`allocate`, `resize`, a dynarray or a hash table); false for null and for anything that is not a fat pointer.
 ///
 /// Examples:
 /// ---
 /// int* p = allocate!int(1);
 /// scope(exit) free(p);
 /// assert(onHeap(p));
+/// assert(!onHeap(cast(int*) null));
 /// ---
 bool onHeap(inout void* p) {
-	immutable t = pointerType(p);
-	return t == PointerType.heap || t == PointerType.dynarray;
+	immutable type = pointerType(p);
+	return type == PointerType.heap || type == PointerType.dynarray || type == PointerType.hashTable;
 }
 
 /// The number of elements (not bytes) in fat pointer `p`, or 0 if it is not valid.
@@ -248,6 +264,7 @@ bool onHeap(inout void* p) {
 pragma(inline, true)
 size_t length(inout void* p) {
 	if (!valid(p)) return 0;
+	assert(headerOf(p).size != notFound && headerOf(p).size != allocationRefused, "fp.pointer: a length that is a sentinel");
 	return headerOf(p).size;
 }
 
@@ -265,7 +282,9 @@ bool empty(inout void* p) {
 	return length(p) == 0;
 }
 
-/// Allocates `payloadBytes` bytes of elements behind a container header of type `H`, which ends in a `Header`. The header is reset to `H.init` and tagged `type`, with no elements, and a terminator follows the payload. Returns the first element, or null if the allocator refused or the total would overflow.
+/// Allocates `payloadBytes` bytes of elements behind a container header of type `H`, which ends in a `Header`.
+/// The header is reset to `H.init` and tagged `type`, with no elements, and a terminator follows the payload.
+/// Returns the first element, or null if the allocator refused or the total would overflow.
 ///
 /// Examples:
 /// ---
@@ -280,8 +299,10 @@ package void* allocateContainer(H)(size_t payloadBytes, PointerType type) @trust
 	bool overflow = false;
 	immutable total = core.checkedint.addu(core.checkedint.addu(H.sizeof, payloadBytes, overflow), 1, overflow);
 	if (overflow) return null;
+	assert(type == PointerType.dynarray || type == PointerType.hashTable, "fp.pointer: only dynarrays and hash tables have container headers");
 	ubyte* raw = cast(ubyte*) allocator(null, total);
 	if (raw is null) return null;
+	assert(cast(size_t) raw % maxAlignment == 0, "fp.pointer: the allocator returned memory aligned below maxAlignment");
 
 	*cast(H*) raw = H.init;
 	ubyte* data = raw + H.sizeof;
@@ -302,7 +323,9 @@ mixin template requireAlignable(T) {
 	static assert(T.alignof <= fp.pointer.maxAlignment, "fp.pointer: " ~ T.stringof ~ " needs more alignment than maxAlignment; only fp.pointer.Array accepts it");
 }
 
-/// Allocates, reallocates (when `p` is non-null) or, when `size` is 0, frees a heap fat pointer of `size` bytes, recording `size` in its header. `p` must be null or a heap fat pointer. Returns null if the allocator refused or the total with the header would overflow, leaving `p` untouched.
+/// Allocates, reallocates (when `p` is non-null) or, when `size` is 0, frees a heap fat pointer of `size` bytes, recording `size` in its header.
+/// `p` must be null or a heap fat pointer.
+/// Returns null if the allocator refused or the total with the header would overflow, leaving `p` untouched.
 ///
 /// Examples:
 /// ---
@@ -325,15 +348,18 @@ package void* resizeHeap(void* p, size_t size) @trusted {
 	ubyte* raw = cast(ubyte*) allocator(base, total);
 	if (raw is null) return null;
 
+	assert(cast(size_t) raw % maxAlignment == 0, "fp.pointer: the allocator returned memory aligned below maxAlignment");
 	ubyte* data = raw + prefixBytes;
 	Header* header = headerOf(data);
 	header.type = PointerType.heap;
 	header.size = size;
 	data[size] = 0;
+	assert(valid(data) && length(data) == size, "fp.pointer: a heap block of the wrong size");
 	return data;
 }
 
-/// `resizeHeap` for `count` elements of `elementSize` bytes each, recording the element count rather than the byte count. Returns null if the allocator refused or the byte count would overflow, leaving `p` untouched.
+/// `resizeHeap` for `count` elements of `elementSize` bytes each, recording the element count rather than the byte count.
+/// Returns null if the allocator refused or the byte count would overflow, leaving `p` untouched.
 ///
 /// Examples:
 /// ---
@@ -345,14 +371,17 @@ package void* resizeHeapArray(void* p, size_t elementSize, size_t count) @truste
 	bool overflow = false;
 	immutable bytes = core.checkedint.mulu(elementSize, count, overflow);
 	if (overflow) return null;
+	assert(elementSize > 0, "fp.pointer: elements of no size");
 	void* data = resizeHeap(p, bytes);
 	if (data is null) return null;
 	headerOf(data).size = count;
+	assert(count == 0 || valid(data), "fp.pointer: a heap array that is not a fat pointer");
 	return data;
 }
 
 
-/// Allocates a heap fat pointer to `n` uninitialized `T`s, or returns null if `n` is 0, the allocator refused, or their byte count would overflow. Elements whose lifetime is not their bytes are left empty.
+/// Allocates a heap fat pointer to `n` uninitialized `T`s, or returns null if `n` is 0, the allocator refused, or their byte count would overflow.
+/// Elements whose lifetime is not their bytes are left empty.
 ///
 /// Examples:
 /// ---
@@ -364,11 +393,15 @@ package void* resizeHeapArray(void* p, size_t elementSize, size_t count) @truste
 T* allocate(T)(size_t n) {
 	mixin requireAlignable!T;
 	T* p = cast(T*) resizeHeapArray(null, T.sizeof, n);
+	assert(p is null || n == 0 || (onHeap(p) && length(p) == n), "fp.pointer: allocate made the wrong length");
 	fp.lifecycle.emptySlots(p, n);
 	return p;
 }
 
-/// Resizes heap fat pointer `p` (or allocates one, if `p` is null) to `n` elements, preserving the existing ones. Returns null if the allocator refused or their byte count would overflow, in which case `p` is still valid. An `n` of 0 instead frees `p`, also returning null, so `p` must not be used or freed again. Elements whose lifetime is not their bytes are ended in the slots `p` loses and left empty in the ones it gains; shrinking such a type moves the kept elements into a new block.
+/// Resizes heap fat pointer `p` (or allocates one, if `p` is null) to `n` elements, preserving the existing ones.
+/// Returns null if the allocator refused or their byte count would overflow, in which case `p` is still valid.
+/// An `n` of 0 instead frees `p`, also returning null, so `p` must not be used or freed again.
+/// Elements whose lifetime is not their bytes are ended in the slots `p` loses and left empty in the ones it gains; shrinking such a type moves the kept elements into a new block.
 ///
 /// Examples:
 /// ---
@@ -383,6 +416,7 @@ T* allocate(T)(size_t n) {
 /// ---
 T* resize(T)(T* p, size_t n) {
 	mixin requireAlignable!T;
+	assert(p is null || pointerType(p) == PointerType.heap, "fp.pointer: resizing something not from allocate");
 	immutable oldLength = length(p);
 	static if (!fp.lifecycle.isBitMoveable!T) {
 		// Truncating the block would drop the removed elements' bytes before their lifetimes could end, so a shrink moves the kept ones into a fresh block.
@@ -404,10 +438,12 @@ T* resize(T)(T* p, size_t n) {
 	}
 	T* data = cast(T*) resizeHeapArray(cast(void*) p, T.sizeof, n);
 	if (data !is null && n > oldLength) fp.lifecycle.emptySlots(data + oldLength, n - oldLength);
+	assert(data is null || n == 0 || length(data) == n, "fp.pointer: resize made the wrong length");
 	return data;
 }
 
-/// Frees heap fat pointer `p`, which may be null but must not be another kind of fat pointer, ending the lifetimes of its elements first. The `ref` overload also sets `p` to null.
+/// Frees heap fat pointer `p`, which may be null but must not be another kind of fat pointer, ending the lifetimes of its elements first.
+/// The `ref` overload also sets `p` to null.
 ///
 /// Examples:
 /// ---
@@ -417,18 +453,21 @@ T* resize(T)(T* p, size_t n) {
 /// free(p); // freeing null is a no-op
 /// ---
 void free(T)(ref T* p) {
-	fp.lifecycle.endLifetimes(p, length(p));
-	cast(void)resizeHeap(cast(void*) p, 0);
+	free(cast(const T*) p);
 	p = null;
 }
 /// Ditto
 void free(T)(const T* p) {
+	assert(p is null || pointerType(p) == PointerType.heap, "fp.pointer: freeing something not from allocate; free each kind through its own module");
 	fp.lifecycle.endLifetimes(cast(T*) p, length(p));
 	cast(void)resizeHeap(cast(void*) p, 0);
 }
 
 
-/// A fat pointer to `N` elements in automatic (stack) storage, with its header and terminator alongside. It converts to `T*` implicitly. Unlike the heap containers, it accepts any `T.alignof`. Elements whose type declares a lifetime have it ended when the declaration goes out of scope, and such an `Array` must not be copied: the copy shares the elements' bytes, so both would end the same lifetimes.
+/// A fat pointer to `N` elements in automatic (stack) storage, with its header and terminator alongside.
+/// It converts to `T*` implicitly.
+/// Unlike the heap containers, it accepts any `T.alignof`.
+/// Elements whose type declares a lifetime have it ended when the declaration goes out of scope, and such an `Array` must not be copied: the copy shares the elements' bytes, so both would end the same lifetimes.
 ///
 /// Examples:
 /// ---
@@ -463,7 +502,8 @@ struct Array(T, size_t N) {
 	alias ptr this;
 }
 
-/// Writes a stack header and terminator around `count` elements at `data`, returning `data`. `allocateOnStack` calls it as an initializer expression, since a mixin template's body cannot hold statements; it is public because that expression runs in the caller's scope.
+/// Writes a stack header and terminator around `count` elements at `data`, returning `data`.
+/// `allocateOnStack` calls it as an initializer expression, since a mixin template's body cannot hold statements; it is public because that expression runs in the caller's scope.
 ///
 /// Examples:
 /// ---
@@ -472,6 +512,8 @@ struct Array(T, size_t N) {
 /// assert(length(p) == 3 && onStack(p));
 /// ---
 T* initializeStackHeader(T)(T* data, size_t count) @trusted {
+	assert(data !is null, "fp.pointer: a stack array with no memory");
+	assert(cast(size_t) data % T.alignof == 0, "fp.pointer: a stack array misaligned for its elements");
 	Header* header = headerOf(data);
 	header.type = PointerType.stack;
 	header.size = count;
@@ -482,7 +524,9 @@ T* initializeStackHeader(T)(T* data, size_t count) @trusted {
 
 /// Declares `T* name`, a fat pointer to `countExpr` elements allocated on the stack with C's `alloca`, for when the size is only known at run time; prefer `Array` when it is known at compile time.
 ///
-/// It is a mixin template because C's `alloca` must run in the stack frame that uses the memory. That memory lives until the enclosing function returns, not until the end of the block, so using it in a loop or a deeply recursive function grows the stack with every pass. Unlike `Array`, no destructor ends the elements' lifetimes, since the only thing in scope is a plain `T*`; call `fp.lifecycle.endLifetimes` before the frame goes away if `T` declares one.
+/// It is a mixin template because C's `alloca` must run in the stack frame that uses the memory.
+/// That memory lives until the enclosing function returns, not until the end of the block, so using it in a loop or a deeply recursive function grows the stack with every pass.
+/// Unlike `Array`, no destructor ends the elements' lifetimes, since the only thing in scope is a plain `T*`; call `fp.lifecycle.endLifetimes` before the frame goes away if `T` declares one.
 ///
 /// Params:
 ///   T         = element type
@@ -519,6 +563,7 @@ mixin template allocateOnStack(T, string name, string countExpr) {
 /// ---
 inout(T)* back(T)(inout T* p) @trusted {
 	immutable n = length(p);
+	assert(n == 0 || valid(p), "fp.pointer: back of something that is not a fat pointer");
 	return p + (n > 0 ? n - 1 : 0);
 }
 
@@ -535,7 +580,9 @@ inout(T)[] slice(T)(inout T* p) {
 }
 
 
-/// Copies the elements of `source` over `destination`, which must be the same length; the two may overlap. The copy is of bytes, so it suits elements whose lifetime is their bytes (`fp.lifecycle.isBitMoveable`); it stands in for slice assignment, which needs druntime under `-betterC`. It cannot fail.
+/// Copies the elements of `source` over `destination`, which must be the same length; the two may overlap.
+/// The copy is of bytes, so it suits elements whose lifetime is their bytes (`fp.lifecycle.isBitMoveable`); it stands in for slice assignment, which needs druntime under `-betterC`.
+/// It cannot fail.
 ///
 /// Examples:
 /// ---
@@ -549,11 +596,14 @@ inout(T)[] slice(T)(inout T* p) {
 void copy(T)(T[] destination, const(T)[] source) @trusted {
 	static assert(fp.lifecycle.isBitMoveable!T, "fp.pointer.copy copies bytes; move " ~ T.stringof ~ " with fp.lifecycle.moveRange or copyRange");
 	assert(destination.length == source.length, "fp.pointer.copy: lengths differ");
+	assert(source.length == 0 || (destination.ptr !is null && source.ptr !is null), "fp.pointer.copy: copying to or from nowhere");
 	static import core.stdc.string;
 	core.stdc.string.memmove(destination.ptr, source.ptr, T.sizeof * source.length);
 }
 
-/// Sets every element of `destination` to `value`, as C's `memset` does for bytes; like `copy`, it suits elements whose lifetime is their bytes and stands in for slice assignment under `-betterC`. View raw memory as `(cast(ubyte*) p)[0 .. bytes]` to clear it. It cannot fail.
+/// Sets every element of `destination` to `value`, as C's `memset` does for bytes; like `copy`, it suits elements whose lifetime is their bytes and stands in for slice assignment under `-betterC`.
+/// View raw memory as `(cast(ubyte*) p)[0 .. bytes]` to clear it.
+/// It cannot fail.
 ///
 /// Examples:
 /// ---
@@ -566,6 +616,7 @@ void copy(T)(T[] destination, const(T)[] source) @trusted {
 /// ---
 void fill(T)(T[] destination, const T value) @trusted {
 	static assert(fp.lifecycle.isBitMoveable!T, "fp.pointer.fill copies bytes; set " ~ T.stringof ~ " elements with fp.lifecycle.copyRange");
+	assert(destination.ptr !is null || destination.length == 0, "fp.pointer.fill: filling nowhere");
 	static if (T.sizeof == 1) {
 		static import core.stdc.string;
 		core.stdc.string.memset(destination.ptr, *cast(const(ubyte)*) &value, destination.length);
@@ -597,6 +648,7 @@ unittest {
 	assert(valid(array));
 	assert(!onStack(array));
 	assert(onHeap(array));
+	assert(!onHeap(cast(int*) null) && !onStack(cast(int*) null));
 	assert(length(array) == 25);
 	assert(array[20] == 6);
 	assert(!empty(array));

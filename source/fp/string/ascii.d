@@ -1,4 +1,5 @@
-/// ASCII character classes and case: digits, letters, whitespace, and comparison that folds ASCII letters to one case. A byte outside ASCII belongs to no class and is never changed, so all of these are safe on UTF-8 text.
+/// ASCII character classes and case: digits, letters, whitespace, and comparison that folds ASCII letters to one case.
+/// A byte outside ASCII belongs to no class and is never changed, so all of these are safe on UTF-8 text.
 ///
 /// Examples:
 /// ---
@@ -117,7 +118,8 @@ char toLower(char c) { return isUpper(c) ? cast(char)(c | 0x20) : c; }
 /// ---
 char toUpper(char c) { return isLower(c) ? cast(char)(c & ~0x20) : c; }
 
-/// Lowers every ASCII uppercase letter of `text` in place. It cannot fail.
+/// Lowers every ASCII uppercase letter of `text` in place.
+/// It cannot fail.
 ///
 /// Examples:
 /// ---
@@ -127,9 +129,11 @@ char toUpper(char c) { return isLower(c) ? cast(char)(c & ~0x20) : c; }
 /// ---
 void lowerInPlace(char[] text) {
 	foreach (ref c; text) c = toLower(c);
+	foreach (c; text) assert(!isUpper(c), "fp.string.ascii.lowerInPlace: left an upper-case letter");
 }
 
-/// Raises every ASCII lowercase letter of `text` in place. It cannot fail.
+/// Raises every ASCII lowercase letter of `text` in place.
+/// It cannot fail.
 ///
 /// Examples:
 /// ---
@@ -139,6 +143,7 @@ void lowerInPlace(char[] text) {
 /// ---
 void upperInPlace(char[] text) {
 	foreach (ref c; text) c = toUpper(c);
+	foreach (c; text) assert(!isLower(c), "fp.string.ascii.upperInPlace: left a lower-case letter");
 }
 
 
@@ -146,7 +151,8 @@ void upperInPlace(char[] text) {
 
 // Whether `a` and `b`, of equal length, match once ASCII letters are folded to one case.
 private bool sameIgnoringCase(const(char)[] a, const(char)[] b) {
-	assert(a.length == b.length);
+	assert(a.length == b.length, "fp.string.ascii: comparing texts of different lengths");
+	assert((a.ptr !is null || a.length == 0) && (b.ptr !is null || b.length == 0), "fp.string.ascii: text with a length but no bytes");
 	foreach (i; 0 .. a.length)
 		if (toLower(a[i]) != toLower(b[i])) return false;
 	return true;
@@ -188,6 +194,7 @@ bool startsWithIgnoringCase(H, N)(H haystack, N needle, size_t start = 0) if (fp
 size_t findIgnoringCase(H, N)(H haystack, N needle, size_t start = 0) if (fp.string.isStringLike!H && fp.string.isStringLike!N) {
 	const(char)[] text = fp.string.slice(haystack), pattern = fp.string.slice(needle);
 	if (start > text.length || pattern.length > text.length - start) return fp.pointer.notFound;
+	assert(text.length < fp.pointer.allocationRefused, "fp.string.ascii.findIgnoringCase: an offset could be read as a sentinel");
 	foreach (at; start .. text.length - pattern.length + 1)
 		if (sameIgnoringCase(text[at .. at + pattern.length], pattern)) return at;
 	return fp.pointer.notFound;

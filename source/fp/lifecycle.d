@@ -1,18 +1,26 @@
 /// The lifetimes of the elements libfp containers hold: how an element is copied, moved, and ended.
 ///
-/// A container keeps every slot it has allocated in one of two states: live, or empty, which is all zero bytes. Copying, moving and ending an element goes through a convention the element type declares, in this order of preference:
+/// A container keeps every slot it has allocated in one of two states: live, or empty, which is all zero bytes.
+/// Copying, moving and ending an element goes through a convention the element type declares, in this order of preference:
 /// $(UL
-///   $(LI `finalize()` ends the element's lifetime. It must be safe on an empty value and leave it empty.)
-///   $(LI `moveTo(ref T destination)` moves into an empty `destination` and leaves the source empty. Without it, a move is a bit copy followed by zeroing the source.)
-///   $(LI `copyTo(ref T destination)` deep-copies into an empty `destination`. It may return `bool`, returning false on refused allocation. Without it, a copy is assignment, which runs a postblit if the type has one.)
+///   $(LI `finalize()` ends the element's lifetime.
+///   It must be safe on an empty value and leave it empty.)
+///   $(LI `moveTo(ref T destination)` moves into an empty `destination` and leaves the source empty.
+///   Without it, a move is a bit copy followed by zeroing the source.)
+///   $(LI `copyTo(ref T destination)` deep-copies into an empty `destination`.
+///   It may return `bool`, returning false on refused allocation.
+///   Without it, a copy is assignment, which runs a postblit if the type has one.)
 /// )
 /// A struct or static array that declares none of these, but holds a field or element that does, takes its lifetime from its parts: ending, copying and discarding it does so field by field, so a component holding an `Owned` or a `fp.rope.Rope` needs no hook of its own.
 ///
-/// D's `~this` is honoured too, when the type has no `finalize`. A type whose lifetime is its bytes (`isBitMoveable!T`) declares none of these, and every operation on it stays a `memcpy`, so `fp.string` and arrays of numbers are unaffected.
+/// D's `~this` is honoured too, when the type has no `finalize`.
+/// A type whose lifetime is its bytes (`isBitMoveable!T`) declares none of these, and every operation on it stays a `memcpy`, so `fp.string` and arrays of numbers are unaffected.
 ///
-/// A fat pointer element is one of those: a container of `char*` holds addresses, not owners, and freeing it does not free what they point at. To make a container own its elements, put them in `Owned`, which declares the hooks and frees what it points at.
+/// A fat pointer element is one of those: a container of `char*` holds addresses, not owners, and freeing it does not free what they point at.
+/// To make a container own its elements, put them in `Owned`, which declares the hooks and frees what it points at.
 ///
-/// A container function that takes an element by value takes over that copy's lifetime: it is moved into the container, or ended when the call does not keep it. Lookups do not take over the caller's element, but they do end the copy they make.
+/// A container function that takes an element by value takes over that copy's lifetime: it is moved into the container, or ended when the call does not keep it.
+/// Lookups do not take over the caller's element, but they do end the copy they make.
 ///
 /// Plain assignment to a slot that already holds an element is a bit copy and does not end the previous one's lifetime; replace a live slot with `moveInto` or `copyInto`.
 ///
@@ -48,7 +56,8 @@ private enum bool declares(T, string hook) = (is(T == struct) || is(T == union))
 private template hasFinalize(T) { enum hasFinalize = declares!(T, "finalize"); }
 private template hasMoveTo(T) { enum hasMoveTo = declares!(T, "moveTo"); }
 private template hasCopyTo(T) { enum hasCopyTo = declares!(T, "copyTo"); }
-// `~this` and `this(this)` have no callable names; the compiler stores them under these. Both must be `@nogc nothrow`, as libfp calls them from `@nogc` code.
+// `~this` and `this(this)` have no callable names; the compiler stores them under these.
+// Both must be `@nogc nothrow`, as libfp calls them from `@nogc` code.
 private template hasDestructor(T) { enum hasDestructor = declares!(T, "__xdtor"); }
 private template hasPostblit(T) { enum hasPostblit = declares!(T, "__postblit"); }
 private template hasOwnDestructor(T) { enum hasOwnDestructor = declares!(T, "__dtor"); }
@@ -119,13 +128,16 @@ private template copiesByParts(T) {
 /// assert(slots[0].data is null);
 /// ---
 void emptySlots(T)(T* p, size_t count) @trusted {
+	assert(p is null || count <= size_t.max / T.sizeof, "fp.lifecycle: more slots than memory can hold");
 	static if (!isBitMoveable!T) {
 		if (p is null || count == 0) return;
 		core.stdc.string.memset(p, 0, T.sizeof * count);
 	}
 }
 
-/// Ends `e`'s lifetime, leaving it empty: `finalize()` if `T` has one, else its `~this`, else, for a struct or static array, each field's or element's lifetime in turn, so a struct holding an `Owned` or a `fp.rope.Rope` needs no hook of its own. Safe on an already empty `e`.
+// bounded: the nesting of `T`'s fields and elements, at compile time
+/// Ends `e`'s lifetime, leaving it empty: `finalize()` if `T` has one, else its `~this`, else, for a struct or static array, each field's or element's lifetime in turn, so a struct holding an `Owned` or a `fp.rope.Rope` needs no hook of its own.
+/// Safe on an already empty `e`.
 ///
 /// Examples:
 /// ---
@@ -155,6 +167,7 @@ void endLifetime(T)(ref T e) {
 /// assert(to.data == cast(int*) 1 && from.data is null);
 /// ---
 void moveInto(T)(ref T destination, ref T source) @trusted {
+	assert(&destination !is &source, "fp.lifecycle: moving a value onto itself would end it");
 	static if (isBitMoveable!T) core.stdc.string.memcpy(&destination, &source, T.sizeof);
 	else static if (hasMoveTo!T) { endLifetime(destination); source.moveTo(destination); }
 	else {
@@ -164,7 +177,9 @@ void moveInto(T)(ref T destination, ref T source) @trusted {
 	}
 }
 
-/// Copies `source` into `destination`, ending whatever `destination` held. Uses `copyTo` if `T` has one, else a postblit through assignment, else, for a struct or static array with parts that copy themselves, each part in turn.
+// bounded: the nesting of `T`'s fields and elements, at compile time
+/// Copies `source` into `destination`, ending whatever `destination` held.
+/// Uses `copyTo` if `T` has one, else a postblit through assignment, else, for a struct or static array with parts that copy themselves, each part in turn.
 ///
 /// Returns false if an allocation was refused, leaving `destination` empty.
 ///
@@ -177,6 +192,7 @@ void moveInto(T)(ref T destination, ref T source) @trusted {
 /// assert(to.data == from.data);
 /// ---
 bool copyInto(T)(ref T destination, ref T source) @trusted {
+	assert(&destination !is &source, "fp.lifecycle: copying a value onto itself would end it first");
 	static if (isBitMoveable!T) {
 		core.stdc.string.memcpy(&destination, &source, T.sizeof);
 		return true;
@@ -217,7 +233,9 @@ bool copyInto(T)(ref T destination, ref T source) @trusted {
 	}
 }
 
-/// Ends the lifetime of `copy`, a bit copy of another element that the caller does not store. When `T` has a copy constructor, the value copied is itself a copy that owns its resources, so they are released here; otherwise the copy aliases the original, so it is only zeroed: the original keeps the resources, and a destructor now sees the empty state.
+// bounded: the nesting of `T`'s fields and elements, at compile time
+/// Ends the lifetime of `copy`, a bit copy of another element that the caller does not store.
+/// When `T` has a copy constructor, the value copied is itself a copy that owns its resources, so they are released here; otherwise the copy aliases the original, so it is only zeroed: the original keeps the resources, and a destructor now sees the empty state.
 ///
 /// Examples:
 /// ---
@@ -239,7 +257,10 @@ void discardBitCopy(T)(ref T copy) {
 	}
 }
 
-/// Ends the lifetime of `copy`, a value made by `copyInto` that the caller does not store. It owns what it holds when `T` deep-copies, with `copyTo` or a postblit; otherwise the copy is a bit copy aliasing the original, so it is only zeroed. A struct or static array without either is handled part by part.
+// bounded: the nesting of `T`'s fields and elements, at compile time
+/// Ends the lifetime of `copy`, a value made by `copyInto` that the caller does not store.
+/// It owns what it holds when `T` deep-copies, with `copyTo` or a postblit; otherwise the copy is a bit copy aliasing the original, so it is only zeroed.
+/// A struct or static array without either is handled part by part.
 ///
 /// Examples:
 /// ---
@@ -286,7 +307,8 @@ void swapInto(T)(ref T a, ref T b) @trusted {
 	}
 }
 
-/// Ends the lifetimes of the `count` elements at `p`, leaving them empty. Does nothing when their lifetime is their bytes.
+/// Ends the lifetimes of the `count` elements at `p`, leaving them empty.
+/// Does nothing when their lifetime is their bytes.
 ///
 /// Examples:
 /// ---
@@ -297,6 +319,8 @@ void swapInto(T)(ref T a, ref T b) @trusted {
 /// assert(slots[0].data is null);
 /// ---
 void endLifetimes(T)(T* p, size_t count) @trusted {
+	assert(p !is null || count == 0, "fp.lifecycle: ending lifetimes at no address");
+	assert(count <= size_t.max / T.sizeof, "fp.lifecycle: more elements than memory can hold");
 	static if (!isBitMoveable!T) {
 		if (p is null || count == 0) return;
 		foreach (i; 0 .. count) endLifetime(p[i]);
@@ -304,7 +328,8 @@ void endLifetimes(T)(T* p, size_t count) @trusted {
 	}
 }
 
-/// Moves `count` elements from `source` to `destination`, ending the lifetimes `destination` held and leaving the source slots empty. The ranges must not overlap.
+/// Moves `count` elements from `source` to `destination`, ending the lifetimes `destination` held and leaving the source slots empty.
+/// The ranges must not overlap.
 ///
 /// Examples:
 /// ---
@@ -315,11 +340,14 @@ void endLifetimes(T)(T* p, size_t count) @trusted {
 /// assert(destination[0].data == cast(int*) 1 && source[0].data is null);
 /// ---
 void moveRange(T)(T* destination, T* source, size_t count) @trusted {
+	assert(count == 0 || (destination !is null && source !is null), "fp.lifecycle: moving elements to or from no address");
+	assert(count == 0 || destination + count <= source || source + count <= destination, "fp.lifecycle: moving between overlapping ranges");
 	static if (isBitMoveable!T) core.stdc.string.memcpy(destination, source, T.sizeof * count);
 	else foreach (i; 0 .. count) moveInto(destination[i], source[i]);
 }
 
-/// Copies `count` elements from `source` into `destination`, ending the lifetimes `destination` held. The ranges must not overlap.
+/// Copies `count` elements from `source` into `destination`, ending the lifetimes `destination` held.
+/// The ranges must not overlap.
 ///
 /// Returns false at the first element whose copy was refused, leaving the ones copied so far copied and that element empty; the elements after it are untouched.
 ///
@@ -332,6 +360,8 @@ void moveRange(T)(T* destination, T* source, size_t count) @trusted {
 /// assert(destination[0].data == cast(int*) 1);
 /// ---
 bool copyRange(T)(T* destination, T* source, size_t count) @trusted {
+	assert(count == 0 || (destination !is null && source !is null), "fp.lifecycle: copying elements to or from no address");
+	assert(count == 0 || destination + count <= source || source + count <= destination, "fp.lifecycle: copying between overlapping ranges");
 	static if (isBitMoveable!T) {
 		core.stdc.string.memcpy(destination, source, T.sizeof * count);
 		return true;
@@ -345,7 +375,12 @@ bool copyRange(T)(T* destination, T* source, size_t count) @trusted {
 alias Finalizer = void function(inout ubyte[]);
 
 // wrapper: adapts endLifetime to Finalizer, the hook a container needs to end an element whose type it does not know
-private void finalizeSlot(T)(inout ubyte[] slot) @trusted { endLifetime(*cast(T*) slot.ptr); }
+private void finalizeSlot(T)(inout ubyte[] slot) @trusted {
+	assert(slot.length == T.sizeof, "fp.lifecycle: finalizing a slot of the wrong size");
+	// Containers align to at most fp.pointer.maxAlignment, so a type asking for more is aligned only that far.
+	assert(cast(size_t) slot.ptr % (T.alignof < fp.pointer.maxAlignment ? T.alignof : fp.pointer.maxAlignment) == 0, "fp.lifecycle: finalizing a misaligned slot");
+	endLifetime(*cast(T*) slot.ptr);
+}
 
 /// The `Finalizer` for `T`: null when its lifetime is its bytes, otherwise one that ends it with its `finalize` or `~this`.
 ///
@@ -367,7 +402,9 @@ Finalizer finalizerOf(T)() {
 
 // --- equality and hashing ------------------------------------------------------
 
-/// Zeroes the bytes of `value` that belong to no field, at any depth, so two values with the same fields have the same bytes however their padding was left. It cannot fail.
+// bounded: the nesting of `T`'s fields and elements, at compile time
+/// Zeroes the bytes of `value` that belong to no field, at any depth, so two values with the same fields have the same bytes however their padding was left.
+/// It cannot fail.
 ///
 /// Examples:
 /// ---
@@ -405,10 +442,13 @@ private FieldBytes!T fieldBytes(T)(ref const T value) @trusted {
 	FieldBytes!T out_;
 	core.stdc.string.memcpy(out_.bytes.ptr, &value, T.sizeof);
 	normalizePadding(*cast(T*) out_.bytes.ptr);
+	static if (__traits(isPOD, T) && !is(T == struct)) assert(out_.bytes[] == (cast(const(ubyte)*) &value)[0 .. T.sizeof], "fp.lifecycle: a scalar changed by having its padding cleared");
 	return out_;
 }
 
-/// Whether `a` and `b` hold the same value: through `T.equal(a, b)` if `T` declares it (as `ecrs.relation.Relates` does); for a struct or static array that owns memory only through its parts, part by part; otherwise by the bytes of their fields, padding ignored. A type that owns memory itself must declare `equal`, since its bytes are addresses. It cannot fail.
+/// Whether `a` and `b` hold the same value: through `T.equal(a, b)` if `T` declares it (as `ecrs.relation.Relates` does); for a struct or static array that owns memory only through its parts, part by part; otherwise by the bytes of their fields, padding ignored.
+/// A type that owns memory itself must declare `equal`, since its bytes are addresses.
+/// It cannot fail.
 ///
 /// Examples:
 /// ---
@@ -434,7 +474,9 @@ bool equal(T)(auto ref const T a, auto ref const T b) @trusted {
 	}
 }
 
-/// The hash of `value`, consistent with `equal`: `T.contentHash(value)` if `T` declares it (as `ecrs.relation.Relates` does); for a struct or static array that owns memory only through its parts, its parts' hashes chained with `fp.algorithms.combine`; otherwise `fp.algorithms.hashBytes` of its fields' bytes, padding ignored. A type that owns memory itself must declare `contentHash`. It cannot fail.
+/// The hash of `value`, consistent with `equal`: `T.contentHash(value)` if `T` declares it (as `ecrs.relation.Relates` does); for a struct or static array that owns memory only through its parts, its parts' hashes chained with `fp.algorithms.combine`; otherwise `fp.algorithms.hashBytes` of its fields' bytes, padding ignored.
+/// A type that owns memory itself must declare `contentHash`.
+/// It cannot fail.
 ///
 /// Examples:
 /// ---
@@ -478,6 +520,7 @@ private T* cloneOwned(T)(T* p) @trusted {
 			T* copy = fp.pointer.allocate!T(n);
 			if (copy is null) return null;
 			if (!copyRange(copy, p, n)) { fp.pointer.free(copy); return null; }
+			assert(fp.pointer.length(copy) == n, "fp.lifecycle: a clone of the wrong length");
 			return copy;
 		}
 		case fp.pointer.PointerType.dynarray: return fp.dynarray.clone(p);
@@ -507,7 +550,9 @@ private const(T)[] ownedElements(T)(const(T)* p) @trusted {
 	return p is null ? null : p[0 .. ownedCount(p)];
 }
 
-/// An owning handle to a libfp container, for when a container should release its `fp.pointer`, `fp.dynarray` or `fp.hashtable` elements as it is itself freed or shrunk. It is a plain `T*` with the hooks above: `finalize` frees what it points at, `moveTo` transfers the pointer, and `copyTo` deep-copies it. `alias p this` keeps it usable wherever a `T*` is.
+/// An owning handle to a libfp container, for when a container should release its `fp.pointer`, `fp.dynarray` or `fp.hashtable` elements as it is itself freed or shrunk.
+/// It is a plain `T*` with the hooks above: `finalize` frees what it points at, `moveTo` transfers the pointer, and `copyTo` deep-copies it.
+/// `alias p this` keeps it usable wherever a `T*` is.
 ///
 /// Only `copyTo` deep-copies: an implicit by-value copy of an `Owned!T` is a bit copy, so passing one to a container hands over the resource and leaves the caller's handle naming it too — do not end that handle's lifetime afterwards.
 ///
@@ -524,15 +569,23 @@ struct Owned(T) {
 	alias p this;
 
 	void finalize() @nogc nothrow { freeOwned(p); p = null; }
-	void moveTo(ref Owned!T destination) @nogc nothrow { destination.p = p; p = null; }
+	void moveTo(ref Owned!T destination) @nogc nothrow {
+		assert(destination.p is null || destination.p !is p, "fp.lifecycle: moving an Owned onto one sharing its container");
+		destination.p = p;
+		p = null;
+	}
 	bool copyTo(ref Owned!T destination) @nogc nothrow {
 		endLifetime(destination);
 		if (p is null) return true;
 		destination.p = cloneOwned(p);
+		assert(destination.p !is p, "fp.lifecycle: a copy of an Owned shares its container");
+		assert(destination.p is null || ownedCount(destination.p) == ownedCount(p), "fp.lifecycle: a copy of an Owned with a different count");
 		return destination.p !is null;
 	}
 
-	/// Whether `a` and `b` own the same elements, each compared through `fp.lifecycle.equal`: in order for an `fp.pointer` or `fp.dynarray` allocation, in any order for an `fp.hashtable`, which takes time quadratic in its size. A null handle owns nothing, so it equals an empty container. It cannot fail.
+	/// Whether `a` and `b` own the same elements, each compared through `fp.lifecycle.equal`: in order for an `fp.pointer` or `fp.dynarray` allocation, in any order for an `fp.hashtable`, which takes time quadratic in its size.
+	/// A null handle owns nothing, so it equals an empty container.
+	/// It cannot fail.
 	///
 	/// Examples:
 	/// ---
@@ -560,7 +613,8 @@ struct Owned(T) {
 		return true;
 	}
 
-	/// The hash of the elements `a` owns, consistent with `equal`: chained in order, or for an `fp.hashtable` summed, since its order is not its value. It cannot fail.
+	/// The hash of the elements `a` owns, consistent with `equal`: chained in order, or for an `fp.hashtable` summed, since its order is not its value.
+	/// It cannot fail.
 	///
 	/// Examples:
 	/// ---

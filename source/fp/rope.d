@@ -1,6 +1,7 @@
 /// Text as a persistent rope, such as an editor's or a compiler's copy of a file being edited: versions are immutable and share every leaf an edit does not touch, so applying an edit, keeping the previous version to compare against, and finding a line or the line of an offset all cost O(log n), and line starts are kept by the tree rather than rescanned.
 ///
-/// A `Rope` is one version. Leaves hold at most `maxLeaf` bytes and are shared by reference count, so `share` gives another owner of a version in O(1), and each owner `free`s its own.
+/// A `Rope` is one version.
+/// Leaves hold at most `maxLeaf` bytes and are shared by reference count, so `share` gives another owner of a version in O(1), and each owner `free`s its own.
 ///
 /// Examples:
 /// ---
@@ -26,10 +27,16 @@ version(unittest) static import fp.testing;
 
 // --- types and layout --------------------------------------------------------
 
-/// The most bytes a leaf holds. An edit copies the leaves it touches, and a line lookup scans one leaf, so this bounds both.
+/// The most bytes a leaf holds.
+/// An edit copies the leaves it touches, and a line lookup scans one leaf, so this bounds both.
 enum size_t maxLeaf = 4096;
 
-// A leaf has no children and its bytes follow the node; an internal node has both children. Nodes are immutable once built.
+/// The most levels of nodes a version has above its leaves.
+/// A version is balanced, so one holding every byte a 64-bit address space has is shallower than this, and every walk of the tree is at most this deep.
+enum uint maxHeight = 96;
+
+// A leaf has no children and its bytes follow the node; an internal node has both children.
+// Nodes are immutable once built.
 private struct Node {
 	Node* left, right;
 	size_t length;
@@ -42,7 +49,9 @@ private struct Node {
 private __gshared Node refusedNode;
 private __gshared Node* refused = &refusedNode;
 
-/// One version of a text, released with `free`. Copying it does not make another owner; `share` does. A container holding ropes (`fp.lifecycle`) frees each it drops and shares each it copies.
+/// One version of a text, released with `free`.
+/// Copying it does not make another owner; `share` does.
+/// A container holding ropes (`fp.lifecycle`) frees each it drops and shares each it copies.
 struct Rope {
 	private Node* root = null;
 
@@ -52,6 +61,8 @@ struct Rope {
 }
 
 private char* bytesOf(Node* leaf) @trusted {
+	assert(leaf !is null && leaf !is refused, "fp.rope: the bytes of no leaf");
+	assert(leaf.left is null && leaf.right is null, "fp.rope: the bytes of an internal node");
 	return cast(char*) (leaf + 1);
 }
 
@@ -59,11 +70,18 @@ private char* bytesOf(Node* leaf) @trusted {
 // --- nodes -------------------------------------------------------------------
 
 private void retain(Node* n) {
-	if (n !is null && n !is refused) ++n.refs;
+	if (n is null || n is refused) return;
+	assert(n.refs > 0, "fp.rope: retaining a freed node");
+	assert(n.refs < uint.max, "fp.rope: a node's reference count would wrap");
+	++n.refs;
 }
 
+// bounded: maxHeight
 private void release(Node* n) @trusted {
-	if (n is null || n is refused || --n.refs) return;
+	if (n is null || n is refused) return;
+	assert(n.refs > 0, "fp.rope: releasing a freed node");
+	assert(n.height <= maxHeight, "fp.rope: a node deeper than maxHeight");
+	if (--n.refs) return;
 	release(n.left);
 	release(n.right);
 	cast(void) fp.pointer.allocator(n, 0);
@@ -78,6 +96,7 @@ private Node* leaf(const(char)[] bytes) @trusted {
 	for (size_t i = 0; i < bytes.length; ++i)
 		if (fp.string.breaksLine(bytes, i))
 			++n.newlines;
+	assert(n.newlines <= n.length, "fp.rope: a leaf with more line breaks than bytes");
 	return n;
 }
 
@@ -94,13 +113,18 @@ private Node* node(Node* l, Node* r) @trusted {
 		release(r);
 		return refused;
 	}
+	assert(l !is null && r !is null && l.length > 0 && r.length > 0, "fp.rope: an internal node with an empty child");
 	*n = Node(l, r, l.length + r.length, l.newlines + r.newlines, 1, (l.height > r.height ? l.height : r.height) + 1);
+	assert(n.height <= maxHeight, "fp.rope: a version deeper than a balanced one can be");
+	assert(n.length > l.length && n.length > r.length, "fp.rope: a node's length wrapped");
 	return n;
 }
 
 // `node(l, r)` rotated back into balance; consumes both, whose heights differ by at most 2.
 private Node* balance(Node* l, Node* r) {
 	if (l is refused || r is refused) return node(l, r);
+	assert(l !is null && r !is null, "fp.rope: balancing an empty side");
+	assert((l.height > r.height ? l.height - r.height : r.height - l.height) <= 2, "fp.rope: balancing sides whose heights differ by more than 2");
 	if (r.height > l.height + 1) {
 		Node* a = r.left, b = r.right;
 		retain(a);
@@ -128,6 +152,7 @@ private Node* balance(Node* l, Node* r) {
 	return node(l, r);
 }
 
+// bounded: maxHeight
 // The concatenation of `a` and `b`, either of which may be empty; consumes both.
 private Node* join(Node* a, Node* b) {
 	if (a is refused || b is refused) {
@@ -137,6 +162,8 @@ private Node* join(Node* a, Node* b) {
 	}
 	if (a is null) return b;
 	if (b is null) return a;
+	assert(a.height <= maxHeight && b.height <= maxHeight, "fp.rope: joining a node deeper than maxHeight");
+	assert(a.length > 0 && b.length > 0, "fp.rope: joining an empty node");
 	if (a.height > b.height + 1) {
 		Node* l = a.left, r = a.right;
 		retain(l);
@@ -154,7 +181,9 @@ private Node* join(Node* a, Node* b) {
 	return node(a, b);
 }
 
-// `t`'s bytes before `at`, which must fall between leaves, into `l` and the rest into `r`; borrows `t`. Both are `refused` on refusal.
+// bounded: maxHeight
+// `t`'s bytes before `at`, which must fall between leaves, into `l` and the rest into `r`; borrows `t`.
+// Both are `refused` on refusal.
 private void split(Node* t, size_t at, ref Node* l, ref Node* r) @trusted {
 	if (t is null || at == 0) {
 		retain(t);
@@ -169,6 +198,7 @@ private void split(Node* t, size_t at, ref Node* l, ref Node* r) @trusted {
 		return;
 	}
 	assert(t.left !is null, "fp.rope.split: cut inside a leaf");
+	assert(t.height <= maxHeight, "fp.rope.split: a node deeper than maxHeight");
 	if (at <= t.left.length) {
 		Node* lr;
 		split(t.left, at, l, lr);
@@ -185,20 +215,26 @@ private void split(Node* t, size_t at, ref Node* l, ref Node* r) @trusted {
 		release(r);
 		l = r = refused;
 	}
+	assert(l is refused || ((l is null ? 0 : l.length) == at && (r is null ? 0 : r.length) == t.length - at), "fp.rope.split: the halves do not add up to the tree");
 }
 
+// bounded: maxHeight, since each call halves `leaves`
 // A balanced tree of `bytes` cut into leaves of near-equal size.
 private Node* build(const(char)[] bytes, size_t leaves) {
 	if (leaves == 0) return null;
 	if (leaves == 1) return leaf(bytes);
+	assert(bytes.length >= leaves, "fp.rope: more leaves than bytes");
 	immutable half = leaves / 2;
 	size_t cut = bytes.length * half / leaves;
 	if (cut > 0 && cut < bytes.length && bytes[cut - 1] == '\r' && bytes[cut] == '\n') ++cut;
+	assert(cut > 0 && cut < bytes.length, "fp.rope: a cut that leaves a side empty");
 	return node(build(bytes[0 .. cut], half), build(bytes[cut .. $], leaves - half));
 }
 
 // The start and length of the leaf holding byte `at`, which must be below `t.length`.
 private void leafAround(Node* t, size_t at, out size_t start, out size_t length) {
+	assert(t !is null && at < t.length, "fp.rope: a byte past the tree");
+	immutable total = t.length;
 	while (t.left !is null) {
 		if (at < t.left.length) t = t.left;
 		else {
@@ -208,10 +244,14 @@ private void leafAround(Node* t, size_t at, out size_t start, out size_t length)
 		}
 	}
 	length = t.length;
+	assert(start + length <= total && length > 0, "fp.rope: a leaf past the tree");
 }
 
+// bounded: maxHeight
 private void copyRange(Node* t, size_t start, size_t end, char* out_) @trusted {
 	if (t is null || start >= end) return;
+	assert(end <= t.length, "fp.rope: copying past the tree");
+	assert(out_ !is null, "fp.rope: copying to nowhere");
 	if (t.left is null) {
 		core.stdc.string.memcpy(out_, bytesOf(t) + start, end - start);
 		return;
@@ -221,8 +261,10 @@ private void copyRange(Node* t, size_t start, size_t end, char* out_) @trusted {
 	if (end > mid) copyRange(t.right, start > mid ? start - mid : 0, end - mid, out_ + (start < mid ? mid - start : 0));
 }
 
+// bounded: maxHeight
 private bool equalRange(Node* t, size_t start, const(char)[] s) @trusted {
 	if (s.length == 0) return true;
+	assert(t !is null && start + s.length <= t.length, "fp.rope: comparing past the tree");
 	if (t.left is null) return core.stdc.string.memcmp(bytesOf(t) + start, s.ptr, s.length) == 0;
 	immutable mid = t.left.length;
 	if (start + s.length <= mid) return equalRange(t.left, start, s);
@@ -230,8 +272,35 @@ private bool equalRange(Node* t, size_t start, const(char)[] s) @trusted {
 	return equalRange(t.left, start, s[0 .. mid - start]) && equalRange(t.right, 0, s[mid - start .. $]);
 }
 
+// bounded: maxHeight, which each node's height is checked against before its children are walked
+private bool validNode(Node* n) @trusted {
+	if (n is null || n is refused || n.refs == 0 || n.height > maxHeight) return false;
+	if (n.left is null) {
+		size_t newlines = 0;
+		foreach (i; 0 .. n.length) newlines += fp.string.breaksLine(bytesOf(n)[0 .. n.length], i);
+		return n.right is null && n.height == 0 && n.length <= maxLeaf && n.newlines == newlines;
+	}
+	if (n.right is null || !validNode(n.left) || !validNode(n.right)) return false;
+	immutable l = n.left.height, r = n.right.height;
+	return (l > r ? l - r : r - l) <= 1 && n.height == (l > r ? l : r) + 1
+		&& n.length == n.left.length + n.right.length && n.newlines == n.left.newlines + n.right.newlines;
+}
+
 
 // --- versions ----------------------------------------------------------------
+
+/// Whether every invariant of `t`'s tree holds: it is balanced and no deeper than `maxHeight`, each node's length and line count are the sums of its children's, and each leaf holds at most `maxLeaf` bytes and counts its own line breaks.
+/// It reads every byte; this module asserts it of each version it makes, which only debug and test builds check.
+///
+/// Examples:
+/// ---
+/// auto t = create("a\nb").get;
+/// scope(exit) free(t);
+/// assert(validate(t) && validate(Rope.init));
+/// ---
+bool validate(const Rope t) @trusted {
+	return t.root is null || validNode(cast(Node*) t.root);
+}
 
 /// A new version holding a copy of `bytes`.
 ///
@@ -246,10 +315,13 @@ private bool equalRange(Node* t, size_t start, const(char)[] s) @trusted {
 std.typecons.Nullable!Rope create(const(char)[] bytes) {
 	auto root = build(bytes, (bytes.length + maxLeaf - 1) / maxLeaf);
 	if (root is refused) return typeof(return).init;
+	assert(validate(Rope(root)), "fp.rope: made a version that breaks the tree's invariants");
+	assert((root is null ? 0 : root.length) == bytes.length, "fp.rope.create: the version has the wrong length");
 	return typeof(return)(Rope(root));
 }
 
-/// Another owner of `t`'s version, which the caller `free`s. It cannot fail.
+/// Another owner of `t`'s version, which the caller `free`s.
+/// It cannot fail.
 ///
 /// Examples:
 /// ---
@@ -260,11 +332,15 @@ std.typecons.Nullable!Rope create(const(char)[] bytes) {
 /// free(b);
 /// ---
 Rope share(const Rope t) @trusted {
+	assert(t.root !is refused, "fp.rope: sharing a refused version");
+	immutable before = t.root is null ? 0 : t.root.refs;
 	retain(cast(Node*) t.root);
+	assert(t.root is null || t.root.refs == before + 1, "fp.rope: share did not take a reference");
 	return Rope(cast(Node*) t.root);
 }
 
-/// Releases `t`'s version, leaving `t` empty. Leaves another version shares stay alive with it.
+/// Releases `t`'s version, leaving `t` empty.
+/// Leaves another version shares stay alive with it.
 ///
 /// Examples:
 /// ---
@@ -273,11 +349,14 @@ Rope share(const Rope t) @trusted {
 /// assert(length(t) == 0);
 /// ---
 void free(ref Rope t) {
+	assert(t.root !is refused, "fp.rope: freeing a refused version");
 	release(t.root);
 	t.root = null;
 }
 
-/// A new version: `from` with bytes `start` to `end` replaced by `replacement`. `from` is unchanged and shares every leaf the edit does not touch with the result. `start <= end <= length(from)`.
+/// A new version: `from` with bytes `start` to `end` replaced by `replacement`.
+/// `from` is unchanged and shares every leaf the edit does not touch with the result.
+/// `start <= end <= length(from)`.
 ///
 /// Returns null if allocation is refused, leaving `from` as it was.
 ///
@@ -339,6 +418,8 @@ std.typecons.Nullable!Rope edit(const Rope from, size_t start, size_t end, const
 	release(unused);
 	auto root = join(join(before, build(scratch[0 .. middle], (middle + maxLeaf - 1) / maxLeaf)), after);
 	if (root is refused) return typeof(return).init;
+	assert(validate(Rope(root)), "fp.rope: made a version that breaks the tree's invariants");
+	assert((root is null ? 0 : root.length) == total - (end - start) + replacement.length, "fp.rope.edit: the edited version has the wrong length");
 	return typeof(return)(Rope(root));
 }
 
@@ -352,6 +433,7 @@ std.typecons.Nullable!Rope edit(const Rope from, size_t start, size_t end, const
 /// assert(length(Rope.init) == 0);
 /// ---
 size_t length(const Rope t) {
+	assert(t.root !is refused, "fp.rope: the length of a refused version");
 	return t.root is null ? 0 : t.root.length;
 }
 
@@ -364,10 +446,13 @@ size_t length(const Rope t) {
 /// assert(lineBreakCount(t) == 2);
 /// ---
 size_t lineBreakCount(const Rope t) {
+	assert(t.root !is refused, "fp.rope: the line breaks of a refused version");
+	assert(t.root is null || t.root.newlines <= t.root.length, "fp.rope: more line breaks than bytes");
 	return t.root is null ? 0 : t.root.newlines;
 }
 
-/// The 0-based line byte `at` lies on: the number of newlines before it. `at` may be `length(t)`.
+/// The 0-based line byte `at` lies on: the number of newlines before it.
+/// `at` may be `length(t)`.
 ///
 /// Examples:
 /// ---
@@ -388,10 +473,12 @@ size_t lineOf(const Rope t, size_t at) @trusted {
 			n = n.right;
 		}
 	}
+	assert(at <= n.length, "fp.rope.lineOf: an offset past its leaf");
 	const(char)* bytes = bytesOf(n);
 	for (size_t i = 0; i < at; ++i)
 		if (fp.string.breaksLine(bytes[0 .. n.length], i))
 			++line;
+	assert(line <= lineBreakCount(t), "fp.rope.lineOf: a line past the last");
 	return line;
 }
 
@@ -412,6 +499,7 @@ size_t lineStart(const Rope t, size_t line) @trusted {
 	if (line > lineBreakCount(t)) return fp.pointer.notFound;
 	auto n = cast(Node*) t.root;
 	size_t base = 0;
+	assert(n !is null, "fp.rope.lineStart: a line break in an empty version");
 	while (n.left !is null) {
 		if (line <= n.left.newlines) n = n.left;
 		else {
@@ -420,6 +508,7 @@ size_t lineStart(const Rope t, size_t line) @trusted {
 			n = n.right;
 		}
 	}
+	assert(line > 0 && line <= n.newlines, "fp.rope.lineStart: a leaf without the line break counted for it");
 	const(char)* bytes = bytesOf(n);
 	for (size_t i = 0; i < n.length; ++i) {
 		if (fp.string.breaksLine(bytes[0 .. n.length], i)) {
@@ -429,7 +518,9 @@ size_t lineStart(const Rope t, size_t line) @trusted {
 	assert(0, "fp.rope.lineStart: line count mismatch");
 }
 
-/// Where the line holding byte `start` of `t` ends, as `fp.string.lineEnd` finds it in a flat string: the offset of the line break after `start`, the `\r` of a `\r\n`, or `length(t)` if none follows. `start` may be `length(t)`. O(log n); it cannot fail.
+/// Where the line holding byte `start` of `t` ends, as `fp.string.lineEnd` finds it in a flat string: the offset of the line break after `start`, the `\r` of a `\r\n`, or `length(t)` if none follows.
+/// `start` may be `length(t)`.
+/// O(log n); it cannot fail.
 ///
 /// Examples:
 /// ---
@@ -438,12 +529,15 @@ size_t lineStart(const Rope t, size_t line) @trusted {
 /// assert(lineEnd(t, 0) == 2 && lineEnd(t, 2) == 2 && lineEnd(t, 4) == 6 && lineEnd(t, 7) == 8 && lineEnd(t, 8) == 8);
 /// ---
 size_t lineEnd(const Rope t, size_t start) {
+	assert(start <= length(t), "fp.rope.lineEnd: offset out of bounds");
 	immutable next = lineStart(t, lineOf(t, start) + 1);
 	if (next == fp.pointer.notFound) return length(t);
+	assert(next > start && next >= 1, "fp.rope.lineEnd: the next line starts before this one");
 	return next >= 2 && equalAt(t, next - 2, "\r\n") ? next - 2 : next - 1;
 }
 
-/// Copies bytes `start` to `end` of `t` into `out_`, which must hold `end - start` bytes. It cannot fail.
+/// Copies bytes `start` to `end` of `t` into `out_`, which must hold `end - start` bytes.
+/// It cannot fail.
 ///
 /// Examples:
 /// ---
@@ -455,6 +549,7 @@ size_t lineEnd(const Rope t, size_t start) {
 /// ---
 void copy(const Rope t, size_t start, size_t end, char[] out_) @trusted {
 	assert(start <= end && end <= length(t) && out_.length >= end - start, "fp.rope.copy: range out of bounds");
+	assert(out_.ptr !is null || start == end, "fp.rope.copy: copying to nowhere");
 	copyRange(cast(Node*) t.root, start, end, out_.ptr);
 }
 
@@ -467,6 +562,7 @@ void copy(const Rope t, size_t start, size_t end, char[] out_) @trusted {
 /// assert(equalAt(t, 1, "ell") && !equalAt(t, 3, "lol"));
 /// ---
 bool equalAt(const Rope t, size_t start, const(char)[] s) @trusted {
+	assert(s.ptr !is null || s.length == 0, "fp.rope.equalAt: a slice with a length but no bytes");
 	if (start > length(t) || s.length > length(t) - start) return false;
 	return equalRange(cast(Node*) t.root, start, s);
 }
@@ -484,7 +580,8 @@ bool equal(const Rope t, const(char)[] s) {
 	return length(t) == s.length && equalAt(t, 0, s);
 }
 
-/// Bytes `start` to `end` of `t` as a new fp string, null for an empty range; `start` and `end` must lie within `t`, `start` first. Free the result with `fp.string.free`.
+/// Bytes `start` to `end` of `t` as a new fp string, null for an empty range; `start` and `end` must lie within `t`, `start` first.
+/// Free the result with `fp.string.free`.
 ///
 /// Returns an empty `Nullable`, rather than a null string, if the string could not be allocated.
 ///
@@ -505,27 +602,16 @@ std.typecons.Nullable!(char*) text(const Rope t, size_t start, size_t end) @trus
 	// The allocation's terminator, past the capacity, ends the string.
 	if (fp.dynarray.growToSize(out_, end - start) is null) return typeof(return).init;
 	copyRange(cast(Node*) t.root, start, end, out_);
+	assert(fp.pointer.length(out_) == end - start && out_[end - start] == '\0', "fp.rope.text: a copy of the wrong length or unterminated");
 	return typeof(return)(out_);
 }
 
 version(unittest) {
 	static import core.stdc.stdio;
 
-	private size_t checkBalanced(Node* n) {
-		if (n.left is null) {
-			assert(n.height == 0 && n.length <= maxLeaf);
-			return 0;
-		}
-		immutable l = checkBalanced(n.left), r = checkBalanced(n.right);
-		assert((l > r ? l - r : r - l) <= 1 && n.height == (l > r ? l : r) + 1);
-		assert(n.length == n.left.length + n.right.length && n.newlines == n.left.newlines + n.right.newlines);
-		return n.height;
-	}
-
 	// Whether `t` reads as `s`, checked byte by byte, line by line, and through its balance.
 	private bool same(const Rope t, const(char)[] s) @trusted {
-		if (!equal(t, s)) return false;
-		if (t.root !is null) cast(void) checkBalanced(cast(Node*) t.root);
+		if (!equal(t, s) || !validate(t)) return false;
 		size_t line = 0;
 		if (lineEnd(t, 0) != fp.string.lineEnd(s, 0)) return false;
 		foreach (i; 0 .. s.length) {
@@ -567,12 +653,12 @@ unittest { // versions: edits share what they leave alone, keep every older vers
 
 	// A deterministic walk of edits: inserts, deletes and replacements, small and spanning many leaves.
 	Rope current = share(original);
-	uint seed = 12345;
-	uint next() { seed = seed * 1103515245 + 12345; return seed >> 8; }
+	static import fp.algorithms;
+	auto random = fp.algorithms.createRandom(12345);
 	foreach (round; 0 .. 400) {
 		immutable size = fp.string.length(model);
-		immutable start = size ? next() % (size + 1) : 0;
-		immutable span = round % 7 == 0 ? next() % (3 * maxLeaf) : next() % 8;
+		immutable start = fp.algorithms.randomBelow(random, size + 1);
+		immutable span = fp.algorithms.randomBelow(random, round % 7 == 0 ? 3 * maxLeaf : 8);
 		immutable end = start + span > size ? size : start + span;
 		const(char)[] insert = round % 5 == 0 ? "\nlong line inserted here, spanning bytes\n" : round % 3 == 0 ? "" : "q\n";
 		auto edited = edit(current, start, end, insert).get;
@@ -644,6 +730,33 @@ unittest { // refused allocations: create and edit return null and leave every v
 		assert(length(t) == fp.string.length(big) - (3 * maxLeaf - 100) + 4 && equalAt(t, 100, "edit"));
 		break;
 	}
+
+	// A walk of edits, each under a random ration: a refused one leaves the version it edited as it was, and the next starts from there.
+	static import fp.algorithms;
+	auto random = fp.algorithms.createRandom(99);
+	Rope current = share(base);
+	scope(exit) free(current);
+	size_t refusals = 0;
+	foreach (round; 0 .. 300) {
+		immutable size = fp.string.length(big);
+		immutable start = fp.algorithms.randomBelow(random, size + 1);
+		immutable span = fp.algorithms.randomBelow(random, round % 5 == 0 ? 2 * maxLeaf : 16);
+		immutable end = start + span > size ? size : start + span;
+		const(char)[] insert = fp.algorithms.randomChance(random, 1, 3) ? "" : "inserted\r\nlines\n";
+		auto allocator = fp.testing.limitAllocations(fp.algorithms.randomBelow(random, 24));
+		auto edited = edit(current, start, end, insert);
+		fp.testing.restoreAllocator(allocator);
+		if (edited.isNull) {
+			++refusals;
+			assert(same(current, fp.string.slice(big)));
+			continue;
+		}
+		assert(fp.string.replaceRange(big, start, end - start, insert));
+		free(current);
+		current = edited.get;
+		assert(equal(current, fp.string.slice(big)) && validate(current));
+	}
+	assert(refusals > 20 && refusals < 280);
 }
 
 unittest { // a container of ropes shares each it copies and frees each it drops; text flattens a rope across leaves

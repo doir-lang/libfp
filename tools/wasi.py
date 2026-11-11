@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Builds the unittests for wasm32-wasi with threads and runs them in a browser, or headlessly under Node, through @bjorn3/browser_wasi_shim's WASI and @emnapi/wasi-threads.
 
-The build links against a wasi-sdk sysroot and compiler-rt builtins, downloaded once into bin/wasi-sdk unless WASI_SYSROOT and WASI_BUILTINS name local copies. It links with `wasm-ld` from PATH (or WASM_LD), falling back to LDC's internal linker.
+The build links against a wasi-sdk sysroot and compiler-rt builtins, downloaded once into bin/wasi-sdk unless WASI_SYSROOT and WASI_BUILTINS name local copies.
+It links with `wasm-ld` from PATH (or WASM_LD), falling back to LDC's internal linker.
 
 Usage:
   tools/wasi.py            build bin/wasi/libfp-tests.wasm and the page that runs it

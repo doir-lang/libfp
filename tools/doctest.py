@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Checks libfp's DDoc against AGENTS.md: every `---` example compiles and passes under -betterC, and every public definition is documented, with an example if it is a function.
 
-Each example becomes a unittest in a generated module that imports only the module it documents, as a user would: outside package `fp`, unless it documents a `package` definition. `#line` directives point failures back at the example's line in the source.
+Each example becomes a unittest in a generated module that imports only the module it documents, as a user would: outside package `fp`, unless it documents a `package` definition.
+`#line` directives point failures back at the example's line in the source.
 
 Usage: tools/doctest.py    (set DC to use a compiler other than ldc2)
 """
@@ -44,14 +45,14 @@ def ddoc_blocks(lines):
 			i += 1
 
 
-def is_function(decl):
-	"""Whether the declaration `decl` starts a function or function template, which must have an example."""
-	if decl.startswith(('struct', 'enum', 'alias', 'module', 'package struct', 'package enum')):
-		return decl.startswith('struct') and '(' in decl.split('{')[0]
-	if '=' in decl.split('(')[0]:
+def is_function(declaration):
+	"""Whether the declaration `declaration` starts a function or function template, which must have an example."""
+	if declaration.startswith(('struct', 'enum', 'alias', 'module', 'package struct', 'package enum')):
+		return declaration.startswith('struct') and '(' in declaration.split('{')[0]
+	if '=' in declaration.split('(')[0]:
 		return False
-	return decl.startswith(('mixin template', 'pragma(inline')) or bool(
-		re.match(r'(package\s+|extern\s*\(C\)\s*)?[\w!().\[\]* ]+?\s+\w+(\([^)]*\))?\(', decl))
+	return declaration.startswith(('mixin template', 'pragma(inline')) or bool(
+		re.match(r'(package\s+|extern\s*\(C\)\s*)?[\w!().\[\]* ]+?\s+\w+(\([^)]*\))?\(', declaration))
 
 
 def check(path, lines, problems, examples):
@@ -62,7 +63,7 @@ def check(path, lines, problems, examples):
 		while j < len(lines) and not lines[j].strip():
 			j += 1
 		documented.add(j)
-		decl = lines[j].strip() if j < len(lines) else ''
+		declaration = lines[j].strip() if j < len(lines) else ''
 		k = j
 		while k < len(lines) and lines[k].strip().startswith('pragma('):
 			k += 1
@@ -79,8 +80,8 @@ def check(path, lines, problems, examples):
 			elif code is not None:
 				code[1].append(text)
 		ditto = any(t.strip().lower().startswith('ditto') for _, t in body)
-		if is_function(decl) and not found and not ditto:
-			problems.append(f'{path}:{j + 1}: documented without an example: {decl}')
+		if is_function(declaration) and not found and not ditto:
+			problems.append(f'{path}:{j + 1}: documented without an example: {declaration}')
 		examples += found
 
 	# A top-level declaration with no DDoc directly above it (past any pragma).
@@ -97,6 +98,11 @@ def check(path, lines, problems, examples):
 			if not (above.startswith('///') or above.endswith('*/')):
 				problems.append(f'{path}:{k + 1}: undocumented: {s}')
 		depth += line.count('{') - line.count('}')
+
+
+def modules_in(sources):
+	"""Returns the module name each file in `sources` declares."""
+	return [re.search(r'^module\s+([\w.]+);', open(p, encoding='utf-8').read(), re.M).group(1) for p in sources]
 
 
 def main():
@@ -153,11 +159,6 @@ def main():
 		print(f'doctest: {len(problems)} documentation problems')
 		return 1
 	return 0
-
-
-def modules_in(sources):
-	"""Returns the module name each file in `sources` declares."""
-	return [re.search(r'^module\s+([\w.]+);', open(p, encoding='utf-8').read(), re.M).group(1) for p in sources]
 
 
 if __name__ == '__main__':

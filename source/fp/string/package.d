@@ -1,6 +1,10 @@
-/// Null-terminated dynamic strings on top of `fp.dynarray`. An fp string is a `char*` dynarray that always ends in a zero byte, so it passes straight to C. A null `char*` is the empty string.
+/// Null-terminated dynamic strings on top of `fp.dynarray`.
+/// An fp string is a `char*` dynarray that always ends in a zero byte, so it passes straight to C. A null `char*` is the empty string.
 ///
-/// Every string argument is `isStringLike`: an fp string, a C string, a D slice or literal, or null. A function that creates a string returns a `Nullable!(char*)`, null if an allocation was refused and otherwise the string, itself null when empty. A function that changes a string takes it by `ref` first and returns false if it was refused, leaving the string as it was. A search returns an index or `fp.pointer.notFound`.
+/// Every string argument is `isStringLike`: an fp string, a C string, a D slice or literal, or null.
+/// A function that creates a string returns a `Nullable!(char*)`, null if an allocation was refused and otherwise the string, itself null when empty.
+/// A function that changes a string takes it by `ref` first and returns false if it was refused, leaving the string as it was.
+/// A search returns an index or `fp.pointer.notFound`.
 ///
 /// Character classes and case are in `fp.string.ascii`, UTF-8 and UTF-16 in `fp.string.utf`, and writing and reading numbers in `fp.string.numbers`.
 ///
@@ -34,7 +38,8 @@ version(unittest) static import fp.testing;
 
 // === types =====================================================================
 
-/// Whether the functions here accept an `S` as a string: a `char*` of any qualifier (an fp string or C string), a D slice or literal, or `typeof(null)`. Static arrays are excluded, since they would be copied and sliced on the stack; pass `buffer[]` instead.
+/// Whether the functions here accept an `S` as a string: a `char*` of any qualifier (an fp string or C string), a D slice or literal, or `typeof(null)`.
+/// Static arrays are excluded, since they would be copied and sliced on the stack; pass `buffer[]` instead.
 ///
 /// Examples:
 /// ---
@@ -43,7 +48,8 @@ version(unittest) static import fp.testing;
 /// ---
 enum bool isStringLike(S) = !__traits(isStaticArray, S) && (is(S : const(char)[]) || is(S : const(char)*));
 
-/// A D slice over the characters of `text`, keeping its qualifier: a D slice as is, an fp string's recorded length, or a C string's `strlen`. Null gives null.
+/// A D slice over the characters of `text`, keeping its qualifier: a D slice as is, an fp string's recorded length, or a C string's `strlen`.
+/// Null gives null.
 ///
 /// Examples:
 /// ---
@@ -65,7 +71,9 @@ auto slice(S)(S text) @trusted if (isStringLike!S) {
 	}
 }
 
-/// A D slice over the zero-terminated string `text`, up to its terminator, keeping its qualifier. Unlike `slice`, it never reads the bytes before `text` for an fp string's header, so it suits a C string whose start may be any byte of a larger buffer. Null gives null.
+/// A D slice over the zero-terminated string `text`, up to its terminator, keeping its qualifier.
+/// Unlike `slice`, it never reads the bytes before `text` for an fp string's header, so it suits a C string whose start may be any byte of a larger buffer.
+/// Null gives null.
 ///
 /// Examples:
 /// ---
@@ -124,6 +132,7 @@ size_t length(S)(S text) if (isStringLike!S) {
 int compare(A, B)(A a, B b) @trusted if (isStringLike!A && isStringLike!B) {
 	const(char)[] x = slice(a), y = slice(b);
 	immutable common = x.length < y.length ? x.length : y.length;
+	assert(common == 0 || (x.ptr !is null && y.ptr !is null), "fp.string.compare: text with a length but no bytes");
 	immutable order = common == 0 ? 0 : core.stdc.string.memcmp(x.ptr, y.ptr, common);
 	if (order != 0) return order;
 	return x.length < y.length ? -1 : x.length > y.length ? 1 : 0;
@@ -140,6 +149,7 @@ int compare(A, B)(A a, B b) @trusted if (isStringLike!A && isStringLike!B) {
 /// ---
 bool equal(A, B)(A a, B b) @trusted if (isStringLike!A && isStringLike!B) {
 	const(char)[] x = slice(a), y = slice(b);
+	assert((x.ptr !is null || x.length == 0) && (y.ptr !is null || y.length == 0), "fp.string.equal: text with a length but no bytes");
 	return x.length == y.length && (x.length == 0 || core.stdc.string.memcmp(x.ptr, y.ptr, x.length) == 0);
 }
 
@@ -187,16 +197,19 @@ size_t find(H, N)(H haystack, N needle, size_t start = 0) @trusted if (isStringL
 	if (pattern.length == 0) return start;
 
 	immutable last = text.length - pattern.length;
+	assert(text.length < fp.pointer.allocationRefused, "fp.string.find: an offset could be read as a sentinel");
 	for (size_t at = start; at <= last; ++at) {
 		auto hit = cast(const(char)*) core.stdc.string.memchr(text.ptr + at, pattern[0], last - at + 1);
 		if (hit is null) break;
 		at = hit - text.ptr;
+		assert(at >= start && at <= last, "fp.string.find: a hit outside the searched range");
 		if (core.stdc.string.memcmp(hit + 1, pattern.ptr + 1, pattern.length - 1) == 0) return at;
 	}
 	return fp.pointer.notFound;
 }
 
-/// The index of the last `needle`, a string or a character, in `haystack`, or `fp.pointer.notFound`. An empty `needle` is found at the end.
+/// The index of the last `needle`, a string or a character, in `haystack`, or `fp.pointer.notFound`.
+/// An empty `needle` is found at the end.
 ///
 /// Examples:
 /// ---
@@ -206,6 +219,7 @@ size_t find(H, N)(H haystack, N needle, size_t start = 0) @trusted if (isStringL
 size_t findLast(H, N)(H haystack, N needle) @trusted if (isStringLike!H && isNeedle!N) {
 	const(char)[] text = slice(haystack), pattern = needleText(needle);
 	if (pattern.length > text.length) return fp.pointer.notFound;
+	assert(text.length < fp.pointer.allocationRefused, "fp.string.findLast: an offset could be read as a sentinel");
 	for (size_t at = text.length - pattern.length + 1; at-- > 0;)
 		if (text[at .. at + pattern.length] == pattern) return at;
 	return fp.pointer.notFound;
@@ -236,7 +250,8 @@ bool startsWith(H, N)(H haystack, N needle, size_t start = 0) @trusted if (isStr
 	return text[start .. start + pattern.length] == pattern;
 }
 
-/// Whether `haystack` ends with `needle`, a string or a character. To ask whether `needle` ends at index `end`, pass `slice(haystack)[0 .. end]`.
+/// Whether `haystack` ends with `needle`, a string or a character.
+/// To ask whether `needle` ends at index `end`, pass `slice(haystack)[0 .. end]`.
 ///
 /// Examples:
 /// ---
@@ -289,6 +304,7 @@ auto trimStart(S)(S text, const(char)[] characters = fp.string.ascii.whitespace)
 	auto view = slice(text);
 	size_t start = 0;
 	while (start < view.length && among(characters, view[start])) ++start;
+	assert(start == view.length || !among(characters, view[start]), "fp.string.trimStart: stopped on a trimmed character");
 	return view[start .. $];
 }
 
@@ -303,6 +319,7 @@ auto trimEnd(S)(S text, const(char)[] characters = fp.string.ascii.whitespace) i
 	auto view = slice(text);
 	size_t end = view.length;
 	while (end > 0 && among(characters, view[end - 1])) --end;
+	assert(end == 0 || !among(characters, view[end - 1]), "fp.string.trimEnd: stopped on a trimmed character");
 	return view[0 .. end];
 }
 
@@ -317,10 +334,14 @@ auto trim(S)(S text, const(char)[] characters = fp.string.ascii.whitespace) if (
 	size_t start = 0, end = view.length;
 	while (start < end && among(characters, view[start])) ++start;
 	while (end > start && among(characters, view[end - 1])) --end;
+	assert(start <= end && end <= view.length, "fp.string.trim: a view past the text");
+	assert(start == end || (!among(characters, view[start]) && !among(characters, view[end - 1])), "fp.string.trim: stopped on a trimmed character");
 	return view[start .. end];
 }
 
-/// Splits `text` on every occurrence of `delimiter`, which must not be empty. Returns a new `fp.dynarray` of slices into `text`, so `text` must outlive them; free the dynarray itself with `fp.dynarray.free`. Returns null if an allocation was refused; on success it holds at least one slice, so it is never null.
+/// Splits `text` on every occurrence of `delimiter`, which must not be empty.
+/// Returns a new `fp.dynarray` of slices into `text`, so `text` must outlive them; free the dynarray itself with `fp.dynarray.free`.
+/// Returns null if an allocation was refused; on success it holds at least one slice, so it is never null.
 ///
 /// Examples:
 /// ---
@@ -332,7 +353,7 @@ auto trim(S)(S text, const(char)[] characters = fp.string.ascii.whitespace) if (
 /// ---
 const(char)[]* split(S, D)(S text, D delimiter) @trusted if (isStringLike!S && isNeedle!D) {
 	const(char)[] view = slice(text), pattern = needleText(delimiter);
-	assert(pattern.length > 0);
+	assert(pattern.length > 0, "fp.string.split: an empty delimiter");
 	const(char)[]* result = null;
 
 	size_t start = 0;
@@ -345,7 +366,9 @@ const(char)[]* split(S, D)(S text, D delimiter) @trusted if (isStringLike!S && i
 		}
 		if (position == fp.pointer.notFound) break;
 		start = position + pattern.length;
+		assert(start <= view.length, "fp.string.split: a piece past the text");
 	}
+	assert(fp.dynarray.length(result) > 0 && fp.dynarray.back(result).ptr + fp.dynarray.back(result).length == view.ptr + view.length, "fp.string.split: the last piece does not end the text");
 	return result;
 }
 
@@ -385,7 +408,8 @@ unittest { // trims keep qualifiers and stop at the other end; splits on charact
 
 // === lines =====================================================================
 
-/// Whether a line break ends at byte `at` of `text`, which must be within it: true at a `\n`, and at a `\r` not followed by `\n`, so `\n`, `\r\n` and a lone `\r` each count once, at their last byte. Every line function here, and `fp.rope`, breaks lines by this rule.
+/// Whether a line break ends at byte `at` of `text`, which must be within it: true at a `\n`, and at a `\r` not followed by `\n`, so `\n`, `\r\n` and a lone `\r` each count once, at their last byte.
+/// Every line function here, and `fp.rope`, breaks lines by this rule.
 ///
 /// Examples:
 /// ---
@@ -408,10 +432,12 @@ size_t lineBreakCount(S)(S text) if (isStringLike!S) {
 	size_t count = 0;
 	foreach (at; 0 .. view.length)
 		if (breaksLine(view, at)) ++count;
+	assert(count <= view.length, "fp.string.lineBreakCount: more line breaks than characters");
 	return count;
 }
 
-/// The 0-based line byte `at` of `text` lies on: the number of line breaks before it. `at` may be `length(text)`.
+/// The 0-based line byte `at` of `text` lies on: the number of line breaks before it.
+/// `at` may be `length(text)`.
 ///
 /// Examples:
 /// ---
@@ -424,6 +450,7 @@ size_t lineOf(S)(S text, size_t at) if (isStringLike!S) {
 	size_t line = 0;
 	foreach (i; 0 .. at)
 		if (breaksLine(view, i)) ++line;
+	assert(line <= at, "fp.string.lineOf: more lines than characters before the offset");
 	return line;
 }
 
@@ -437,12 +464,15 @@ size_t lineOf(S)(S text, size_t at) if (isStringLike!S) {
 size_t lineStart(S)(S text, size_t line) if (isStringLike!S) {
 	if (line == 0) return 0;
 	const(char)[] view = slice(text);
+	assert(view.length < fp.pointer.notFound, "fp.string.lineStart: an offset could be read as a sentinel");
 	foreach (at; 0 .. view.length)
 		if (breaksLine(view, at) && --line == 0) return at + 1;
+	assert(line > 0, "fp.string.lineStart: counted past the line asked for");
 	return fp.pointer.notFound;
 }
 
-/// Where the line holding byte `start` of `text` ends: the offset of the line break after `start`, or `length(text)` if none follows. `start` may be `length(text)`.
+/// Where the line holding byte `start` of `text` ends: the offset of the line break after `start`, or `length(text)` if none follows.
+/// `start` may be `length(text)`.
 ///
 /// Examples:
 /// ---
@@ -453,6 +483,7 @@ size_t lineEnd(S)(S text, size_t start) if (isStringLike!S) {
 	assert(start <= view.length, "fp.string.lineEnd: offset out of bounds");
 	foreach (at; start .. view.length)
 		if (view[at] == '\n' || view[at] == '\r') return at;
+	assert(fp.string.find(view, '\n', start) == fp.pointer.notFound, "fp.string.lineEnd: missed a line break");
 	return view.length;
 }
 
@@ -480,7 +511,8 @@ unittest { // every line function agrees with the others on text mixing all thre
 
 // === creation and freeing ======================================================
 
-/// A new fp string holding a copy of `text`, null if `text` is empty, since null is the empty string. Returns null, rather than a null string, if the copy could not be allocated.
+/// A new fp string holding a copy of `text`, null if `text` is empty, since null is the empty string.
+/// Returns null, rather than a null string, if the copy could not be allocated.
 ///
 /// Examples:
 /// ---
@@ -497,10 +529,16 @@ std.typecons.Nullable!(char*) clone(S)(S text) @trusted if (isStringLike!S) {
 	char* out_ = null;
 	if (fp.dynarray.growToSize(out_, view.length) is null) return typeof(return).init;
 	core.stdc.string.memcpy(out_, view.ptr, view.length);
+	assert(length(out_) == view.length && out_[view.length] == '\0', "fp.string.clone: a copy of the wrong length or unterminated");
+	assert(fp.dynarray.valid(out_), "fp.string.clone: a copy that cannot grow");
 	return typeof(return)(out_);
 }
 
-/// Frees `text`, which may be an fp string, a plain heap fat pointer, or memory straight from `fp.pointer.allocator`; each is released by its own layer. A stack fat pointer (from `fp.pointer.Array` or `fp.pointer.allocateOnStack`) belongs to its frame and is left alone. A hash table is rejected and left untouched, since only `fp.hashtable.free` can release it. Anything else is passed to `fp.pointer.allocator` as though it came from it, so a string literal or a stack buffer must not be freed here. The `ref` overload also sets `text` to null, unless it was rejected.
+/// Frees `text`, which may be an fp string, a plain heap fat pointer, or memory straight from `fp.pointer.allocator`; each is released by its own layer.
+/// A stack fat pointer (from `fp.pointer.Array` or `fp.pointer.allocateOnStack`) belongs to its frame and is left alone.
+/// A hash table is rejected and left untouched, since only `fp.hashtable.free` can release it.
+/// Anything else is passed to `fp.pointer.allocator` as though it came from it, so a string literal or a stack buffer must not be freed here.
+/// The `ref` overload also sets `text` to null, unless it was rejected.
 ///
 /// Examples:
 /// ---
@@ -513,6 +551,7 @@ void free(ref char* text) @trusted {
 	if (fp.pointer.pointerType(text) == fp.pointer.PointerType.hashTable) return;
 	free(cast(const char*) text);
 	text = null;
+	assert(length(text) == 0, "fp.string.free: text left behind");
 }
 /// Ditto
 void free(const char* text) @trusted {
@@ -565,7 +604,8 @@ private bool growable(const char* text) @trusted {
 	return text is null || fp.dynarray.valid(cast(void*) text);
 }
 
-/// Appends `b` to `a`, which may be null. Returns false if `a` could not grow or is a pointer that is not an fp string and so cannot grow, leaving it unchanged; appending nothing to a string that could grow succeeds.
+/// Appends `b` to `a`, which may be null.
+/// Returns false if `a` could not grow or is a pointer that is not an fp string and so cannot grow, leaving it unchanged; appending nothing to a string that could grow succeeds.
 ///
 /// Examples:
 /// ---
@@ -585,13 +625,19 @@ bool concatenate(S)(ref char* a, S b) @trusted if (isStringLike!S) {
 	if (!growable(a)) return false;
 	const(char)[] view = slice(b);
 	if (view.length == 0) return true;
-	if (!fp.dynarray.concatenate(a, view)) return false;
+	immutable before = length(a);
+	if (!fp.dynarray.concatenate(a, view)) {
+		assert(length(a) == before, "fp.string.concatenate: a refused concatenation changed the text");
+		return false;
+	}
 	// The NUL written at allocation sits at the end of the capacity, which may run past the string.
 	a[length(a)] = 0;
+	assert(length(a) == before + view.length, "fp.string.concatenate: appended the wrong number of characters");
 	return true;
 }
 
-// Characters and numbers go through a stack buffer, not `format`, which would heap-allocate for every one appended. Returns false only if an allocation was refused.
+// Characters and numbers go through a stack buffer, not `format`, which would heap-allocate for every one appended.
+// Returns false only if an allocation was refused.
 private bool appendPiece(T)(ref char* text, T piece) @trusted {
 	// `is(T : const(char)*)` covers every qualifier `slice` accepts; naming them individually once missed `immutable(char)*`, a literal's `.ptr`.
 	static if (is(T : const(char)[]) || is(T : const(char)*)) {
@@ -602,6 +648,7 @@ private bool appendPiece(T)(ref char* text, T piece) @trusted {
 		char[4] buffer;
 		size_t n = fp.string.utf.encode(piece, buffer);
 		if (n == 0) n = fp.string.utf.encode(0xFFFD, buffer);
+		assert(n > 0 && n <= buffer.length, "fp.string: a character encoded to no bytes");
 		return concatenate(text, buffer[0 .. n]);
 	} else static if (is(T : real) && !is(T : long) && !is(T : ulong)) {
 		return fp.string.numbers.appendFloat(text, cast(double) piece);
@@ -612,7 +659,10 @@ private bool appendPiece(T)(ref char* text, T piece) @trusted {
 	} else static assert(0, "fp.string: cannot append a " ~ T.stringof);
 }
 
-/// Appends every piece to `text`, which may be null: slices, fp strings, characters, and numbers (integers in decimal, floating point in the shortest form that reads back as the same `double`). A `wchar` or `dchar` is encoded as UTF-8, and one that cannot be, such as a lone surrogate, as U+FFFD. A piece may view `text` itself. Returns false if an allocation was refused, leaving `text` as it was.
+/// Appends every piece to `text`, which may be null: slices, fp strings, characters, and numbers (integers in decimal, floating point in the shortest form that reads back as the same `double`).
+/// A `wchar` or `dchar` is encoded as UTF-8, and one that cannot be, such as a lone surrogate, as U+FFFD.
+/// A piece may view `text` itself.
+/// Returns false if an allocation was refused, leaving `text` as it was.
 ///
 /// Examples:
 /// ---
@@ -649,13 +699,16 @@ bool append(Args...)(ref char* text, Args pieces) @trusted {
 				cast(void)fp.dynarray.removeLast(text, length(text) - before);
 				text[before] = 0;
 			}
+			assert(length(text) == before, "fp.string.append: a refused append changed the text");
 			return false;
 		}
 	}}
+	assert(length(text) >= before && (text is null || text[length(text)] == '\0'), "fp.string.append: lost text or its terminator");
 	return true;
 }
 
-/// A new fp string of every piece, as `append` writes them; it is null, the empty string, when every piece is empty. Returns null, rather than a null string, if an allocation was refused.
+/// A new fp string of every piece, as `append` writes them; it is null, the empty string, when every piece is empty.
+/// Returns null, rather than a null string, if an allocation was refused.
 ///
 /// Examples:
 /// ---
@@ -666,7 +719,10 @@ bool append(Args...)(ref char* text, Args pieces) @trusted {
 /// ---
 std.typecons.Nullable!(char*) joined(Args...)(Args pieces) {
 	char* out_ = null;
-	if (!append(out_, pieces)) return typeof(return).init;
+	if (!append(out_, pieces)) {
+		assert(out_ is null, "fp.string.joined: a refused join kept its text");
+		return typeof(return).init;
+	}
 	return typeof(return)(out_);
 }
 
@@ -694,12 +750,16 @@ private extern (C) std.typecons.Nullable!(char*) formatC(const char* pattern, ..
 	if (fp.dynarray.growToSize(out_, size) is null) return typeof(return).init;
 	core.stdc.stdarg.va_list args;
 	core.stdc.stdarg.va_start(args, pattern);
-	cast(void)core.stdc.stdio.vsnprintf(out_, size + 1, pattern, args);
+	immutable written = core.stdc.stdio.vsnprintf(out_, size + 1, pattern, args);
 	core.stdc.stdarg.va_end(args);
+	assert(written == size, "fp.string.format: the arguments formatted to a different length the second time");
+	assert(out_[size] == '\0', "fp.string.format: an unterminated result");
 	return typeof(return)(out_);
 }
 
-/// A new fp string formatted by `vsnprintf`, null if the result is empty. A slice argument may stand where `%s` expects a string: it is passed as a null-terminated copy, since C varargs cannot carry a D slice. Returns null, rather than a null string, if `vsnprintf` rejected the format or an allocation, of a copy or of the result, was refused.
+/// A new fp string formatted by `vsnprintf`, null if the result is empty.
+/// A slice argument may stand where `%s` expects a string: it is passed as a null-terminated copy, since C varargs cannot carry a D slice.
+/// Returns null, rather than a null string, if `vsnprintf` rejected the format or an allocation, of a copy or of the result, was refused.
 ///
 /// Examples:
 /// ---
@@ -852,7 +912,9 @@ unittest { // refusals leave the string as it was
 
 // === edit ======================================================================
 
-/// Repeats fp string `text` so it holds `times` copies of itself. A `times` of 0 frees it, leaving null, and an empty `text` stays as it is. Returns false if an allocation was refused, the length would overflow, or `text` is a pointer that is not an fp string and so cannot grow, leaving `text` unchanged.
+/// Repeats fp string `text` so it holds `times` copies of itself.
+/// A `times` of 0 frees it, leaving null, and an empty `text` stays as it is.
+/// Returns false if an allocation was refused, the length would overflow, or `text` is a pointer that is not an fp string and so cannot grow, leaving `text` unchanged.
 ///
 /// Examples:
 /// ---
@@ -875,10 +937,12 @@ bool repeat(ref char* text, size_t times) @trusted {
 	foreach (copy; 1 .. times)
 		core.stdc.string.memcpy(text + copy * once, text, once);
 	text[total] = 0;
+	assert(length(text) == total, "fp.string.repeat: the wrong length");
 	return true;
 }
 
-/// Replaces the `count` characters of fp string `text` starting at `start`, which must fit within it, with `replacement`, which may view `text` itself. Returns false if an allocation was refused or `text` is a pointer that is not an fp string and so cannot grow, leaving it unchanged.
+/// Replaces the `count` characters of fp string `text` starting at `start`, which must fit within it, with `replacement`, which may view `text` itself.
+/// Returns false if an allocation was refused or `text` is a pointer that is not an fp string and so cannot grow, leaving it unchanged.
 ///
 /// Examples:
 /// ---
@@ -915,10 +979,12 @@ bool replaceRange(S)(ref char* text, size_t start, size_t count, S replacement) 
 		core.stdc.string.memmove(text + start, with_.ptr, with_.length);
 	}
 	if (text !is null) text[length(text)] = 0;
+	assert(length(text) == before - count + with_.length, "fp.string.replaceRange: the wrong length");
 	return true;
 }
 
-/// Replaces the first `needle` at or after `start` (0 by default) in fp string `text` with `replacement`. Returns where it was found, `fp.pointer.notFound`, or `fp.pointer.allocationRefused` if `text` could not grow, leaving it unchanged.
+/// Replaces the first `needle` at or after `start` (0 by default) in fp string `text` with `replacement`.
+/// Returns where it was found, `fp.pointer.notFound`, or `fp.pointer.allocationRefused` if `text` could not grow, leaving it unchanged.
 ///
 /// Examples:
 /// ---
@@ -933,11 +999,14 @@ size_t replaceFirst(N, R)(ref char* text, N needle, R replacement, size_t start 
 	const(char)[] pattern = needleText(needle);
 	immutable at = find(text, pattern, start);
 	if (at == fp.pointer.notFound) return at;
+	assert(at >= start && at + pattern.length <= length(text), "fp.string.replaceFirst: a match past the text");
 	if (!replaceRange(text, at, pattern.length, replacement)) return fp.pointer.allocationRefused;
 	return at;
 }
 
-/// Replaces every `needle`, which must not be empty, at or after `start` (0 by default) in fp string `text` with `replacement`, never rescanning replaced text. Either argument may view `text` itself. Returns false if an allocation was refused or `text` is a pointer that is not an fp string and so cannot grow, leaving `text` unchanged.
+/// Replaces every `needle`, which must not be empty, at or after `start` (0 by default) in fp string `text` with `replacement`, never rescanning replaced text.
+/// Either argument may view `text` itself.
+/// Returns false if an allocation was refused or `text` is a pointer that is not an fp string and so cannot grow, leaving `text` unchanged.
 ///
 /// Examples:
 /// ---
@@ -969,6 +1038,7 @@ bool replaceAll(N, R)(ref char* text, N needle, R replacement, size_t start = 0)
 	}
 	free(text);
 	text = out_;
+	assert(text is null || fp.dynarray.valid(text), "fp.string.replaceAll: a result that cannot grow");
 	return true;
 }
 
